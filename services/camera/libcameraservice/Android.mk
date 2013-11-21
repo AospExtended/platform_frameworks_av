@@ -79,6 +79,10 @@ LOCAL_EXPORT_C_INCLUDE_DIRS := \
 
 LOCAL_CFLAGS += -Wall -Wextra -Werror
 
+ifeq ($(BOARD_NEEDS_MEMORYHEAPION),true)
+    LOCAL_CFLAGS += -DUSE_MEMORY_HEAP_ION
+endif
+
 LOCAL_MODULE:= libcameraservice
 
 include $(BUILD_SHARED_LIBRARY)
