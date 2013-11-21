@@ -79,10 +79,6 @@ struct OMXNodeInstance {
             OMX_U32 portIndex, const sp<GraphicBuffer> &graphicBuffer,
             OMX::buffer_id buffer);
 
-    status_t updateNativeHandleInMeta(
-            OMX_U32 portIndex, const sp<NativeHandle> &nativeHandle,
-            OMX::buffer_id buffer);
-
     status_t createInputSurface(
             OMX_U32 portIndex, android_dataspace dataSpace,
             sp<IGraphicBufferProducer> *bufferProducer,
@@ -102,7 +98,7 @@ struct OMXNodeInstance {
 
     status_t allocateSecureBuffer(
             OMX_U32 portIndex, size_t size, OMX::buffer_id *buffer,
-            void **buffer_data, sp<NativeHandle> *native_handle);
+            void **buffer_data, native_handle_t **native_handle);
 
     status_t allocateBufferWithBackup(
             OMX_U32 portIndex, const sp<IMemory> &params,
@@ -200,7 +196,7 @@ private:
 
     // For buffer id management
     OMX::buffer_id makeBufferID(OMX_BUFFERHEADERTYPE *bufferHeader);
-    OMX_BUFFERHEADERTYPE *findBufferHeader(OMX::buffer_id buffer, OMX_U32 portIndex);
+    OMX_BUFFERHEADERTYPE *findBufferHeader(OMX::buffer_id buffer);
     OMX::buffer_id findBufferID(OMX_BUFFERHEADERTYPE *bufferHeader);
     void invalidateBufferID(OMX::buffer_id buffer);
 

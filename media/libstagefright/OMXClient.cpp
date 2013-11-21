@@ -111,10 +111,6 @@ struct MuxOMX : public IOMX {
             node_id node, OMX_U32 port_index,
             const sp<GraphicBuffer> &graphicBuffer, buffer_id buffer);
 
-    virtual status_t updateNativeHandleInMeta(
-            node_id node, OMX_U32 port_index,
-            const sp<NativeHandle> &nativeHandle, buffer_id buffer);
-
     virtual status_t createInputSurface(
             node_id node, OMX_U32 port_index, android_dataspace dataSpace,
             sp<IGraphicBufferProducer> *bufferProducer, MetadataBufferType *type);
@@ -131,7 +127,7 @@ struct MuxOMX : public IOMX {
 
     virtual status_t allocateSecureBuffer(
             node_id node, OMX_U32 port_index, size_t size,
-            buffer_id *buffer, void **buffer_data, sp<NativeHandle> *native_handle);
+            buffer_id *buffer, void **buffer_data, native_handle_t **native_handle);
 
     virtual status_t allocateBufferWithBackup(
             node_id node, OMX_U32 port_index, const sp<IMemory> &params,
@@ -397,13 +393,6 @@ status_t MuxOMX::updateGraphicBufferInMeta(
             node, port_index, graphicBuffer, buffer);
 }
 
-status_t MuxOMX::updateNativeHandleInMeta(
-        node_id node, OMX_U32 port_index,
-        const sp<NativeHandle> &nativeHandle, buffer_id buffer) {
-    return getOMX(node)->updateNativeHandleInMeta(
-            node, port_index, nativeHandle, buffer);
-}
-
 status_t MuxOMX::createInputSurface(
         node_id node, OMX_U32 port_index, android_dataspace dataSpace,
         sp<IGraphicBufferProducer> *bufferProducer, MetadataBufferType *type) {
@@ -440,7 +429,7 @@ status_t MuxOMX::signalEndOfInputStream(node_id node) {
 
 status_t MuxOMX::allocateSecureBuffer(
         node_id node, OMX_U32 port_index, size_t size,
-        buffer_id *buffer, void **buffer_data, sp<NativeHandle> *native_handle) {
+        buffer_id *buffer, void **buffer_data, native_handle_t **native_handle) {
     return getOMX(node)->allocateSecureBuffer(
             node, port_index, size, buffer, buffer_data, native_handle);
 }
