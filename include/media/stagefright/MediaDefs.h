@@ -146,7 +146,7 @@ static AudioEncoding bitsToAudioEncoding(int32_t bits) {
         case 16:
             return kAudioEncodingPcm16bit;
         case 24:
-            return kAudioEncodingPcm32bit;
+            return kAudioEncodingPcm24bitPacked;
         case 32:
             return kAudioEncodingPcmFloat;
     }
@@ -162,9 +162,9 @@ static int32_t audioEncodingToBits(AudioEncoding encoding) {
         case kAudioEncodingPcm16bit:
             return 16;
         case kAudioEncodingPcm24bitPacked:
-        case kAudioEncodingPcm32bit:
             return 24;
         case kAudioEncodingPcmFloat:
+        case kAudioEncodingPcm32bit:
             return 32;
     }
     return 0;
