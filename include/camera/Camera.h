@@ -43,7 +43,6 @@ public:
     virtual void postData(int32_t msgType, const sp<IMemory>& dataPtr,
                           camera_frame_metadata_t *metadata) = 0;
     virtual void postDataTimestamp(nsecs_t timestamp, int32_t msgType, const sp<IMemory>& dataPtr) = 0;
-    virtual void postRecordingFrameHandleTimestamp(nsecs_t timestamp, native_handle_t* handle) = 0;
 };
 
 class Camera;
@@ -115,9 +114,6 @@ public:
             // release a recording frame
             void        releaseRecordingFrame(const sp<IMemory>& mem);
 
-            // release a recording frame handle
-            void        releaseRecordingFrameHandle(native_handle_t *handle);
-
             // autoFocus - status returned from callback
             status_t    autoFocus();
 
@@ -165,7 +161,6 @@ public:
     virtual void        dataCallback(int32_t msgType, const sp<IMemory>& dataPtr,
                                      camera_frame_metadata_t *metadata);
     virtual void        dataCallbackTimestamp(nsecs_t timestamp, int32_t msgType, const sp<IMemory>& dataPtr);
-    virtual void        recordingFrameHandleCallbackTimestamp(nsecs_t timestamp, native_handle_t* handle);
 
     class RecordingProxy : public BnCameraRecordingProxy
     {
@@ -176,7 +171,6 @@ public:
         virtual status_t startRecording(const sp<ICameraRecordingProxyListener>& listener);
         virtual void stopRecording();
         virtual void releaseRecordingFrame(const sp<IMemory>& mem);
-        virtual void releaseRecordingFrameHandle(native_handle_t* handle);
 
     private:
         sp<Camera>         mCamera;

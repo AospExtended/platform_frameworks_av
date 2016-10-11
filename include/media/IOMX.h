@@ -37,7 +37,6 @@ namespace android {
 class IMemory;
 class IOMXObserver;
 class IOMXRenderer;
-class NativeHandle;
 class Surface;
 
 class IOMX : public IInterface {
@@ -119,10 +118,6 @@ public:
             node_id node, OMX_U32 port_index,
             const sp<GraphicBuffer> &graphicBuffer, buffer_id buffer) = 0;
 
-    virtual status_t updateNativeHandleInMeta(
-            node_id node, OMX_U32 port_index,
-            const sp<NativeHandle> &nativeHandle, buffer_id buffer) = 0;
-
     // This will set *type to resulting metadata buffer type on OMX error (not on binder error) as
     // well as on success.
     virtual status_t createInputSurface(
@@ -150,7 +145,7 @@ public:
     // pointer is just that, a pointer into local address space.
     virtual status_t allocateSecureBuffer(
             node_id node, OMX_U32 port_index, size_t size,
-            buffer_id *buffer, void **buffer_data, sp<NativeHandle> *native_handle) = 0;
+            buffer_id *buffer, void **buffer_data, native_handle_t **native_handle) = 0;
 
     // Allocate an OMX buffer of size |allotedSize|. Use |params| as the backup buffer, which
     // may be larger.
@@ -277,18 +272,17 @@ struct CodecProfileLevel {
     OMX_U32 mLevel;
 };
 
-inline static const char *asString(MetadataBufferType i, const char *def = "??") {
+}  // namespace android
+
+inline static const char *asString(android::MetadataBufferType i, const char *def = "??") {
     using namespace android;
     switch (i) {
         case kMetadataBufferTypeCameraSource:   return "CameraSource";
         case kMetadataBufferTypeGrallocSource:  return "GrallocSource";
         case kMetadataBufferTypeANWBuffer:      return "ANWBuffer";
-        case kMetadataBufferTypeNativeHandleSource: return "NativeHandleSource";
         case kMetadataBufferTypeInvalid:        return "Invalid";
         default:                                return def;
     }
 }
-
-}  // namespace android
 
 #endif  // ANDROID_IOMX_H_
