@@ -93,10 +93,6 @@ public:
             node_id node, OMX_U32 port_index,
             const sp<GraphicBuffer> &graphicBuffer, buffer_id buffer);
 
-    virtual status_t updateNativeHandleInMeta(
-            node_id node, OMX_U32 port_index,
-            const sp<NativeHandle> &nativeHandle, buffer_id buffer);
-
     virtual status_t createInputSurface(
             node_id node, OMX_U32 port_index, android_dataspace dataSpace,
             sp<IGraphicBufferProducer> *bufferProducer,
@@ -115,7 +111,7 @@ public:
 
     virtual status_t allocateSecureBuffer(
             node_id node, OMX_U32 port_index, size_t size,
-            buffer_id *buffer, void **buffer_data, sp<NativeHandle> *native_handle);
+            buffer_id *buffer, void **buffer_data, native_handle_t **native_handle);
 
     virtual status_t allocateBufferWithBackup(
             node_id node, OMX_U32 port_index, const sp<IMemory> &params,

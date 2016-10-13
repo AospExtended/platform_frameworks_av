@@ -21,12 +21,10 @@
 #include <stdint.h>
 #include <sys/types.h>
 #include <binder/Parcel.h>
-#include <camera/CameraUtils.h>
 #include <android/hardware/ICamera.h>
 #include <android/hardware/ICameraClient.h>
 #include <gui/IGraphicBufferProducer.h>
 #include <gui/Surface.h>
-#include <media/hardware/HardwareAPI.h>
 
 namespace android {
 namespace hardware {
@@ -54,7 +52,6 @@ enum {
     RELEASE_RECORDING_FRAME,
     SET_VIDEO_BUFFER_MODE,
     SET_VIDEO_BUFFER_TARGET,
-    RELEASE_RECORDING_FRAME_HANDLE,
 };
 
 class BpCamera: public BpInterface<ICamera>
@@ -155,21 +152,7 @@ public:
         Parcel data, reply;
         data.writeInterfaceToken(ICamera::getInterfaceDescriptor());
         data.writeStrongBinder(IInterface::asBinder(mem));
-
         remote()->transact(RELEASE_RECORDING_FRAME, data, &reply);
-    }
-
-    void releaseRecordingFrameHandle(native_handle_t *handle) {
-        ALOGV("releaseRecordingFrameHandle");
-        Parcel data, reply;
-        data.writeInterfaceToken(ICamera::getInterfaceDescriptor());
-        data.writeNativeHandle(handle);
-
-        remote()->transact(RELEASE_RECORDING_FRAME_HANDLE, data, &reply);
-
-        // Close the native handle because camera received a dup copy.
-        native_handle_close(handle);
-        native_handle_delete(handle);
     }
 
     status_t setVideoBufferMode(int32_t videoBufferMode)
@@ -369,13 +352,6 @@ status_t BnCamera::onTransact(
             CHECK_INTERFACE(ICamera, data, reply);
             sp<IMemory> mem = interface_cast<IMemory>(data.readStrongBinder());
             releaseRecordingFrame(mem);
-            return NO_ERROR;
-        } break;
-        case RELEASE_RECORDING_FRAME_HANDLE: {
-            ALOGV("RELEASE_RECORDING_FRAME_HANDLE");
-            CHECK_INTERFACE(ICamera, data, reply);
-            // releaseRecordingFrameHandle will be responsble to close the native handle.
-            releaseRecordingFrameHandle(data.readNativeHandle());
             return NO_ERROR;
         } break;
         case SET_VIDEO_BUFFER_MODE: {

@@ -805,10 +805,10 @@ status_t ACodec::allocateBuffersOnPort(OMX_U32 portIndex) {
             MetadataBufferType type =
                 portIndex == kPortIndexOutput ? mOutputMetadataType : mInputMetadataType;
             size_t bufSize = def.nBufferSize;
-            if (type == kMetadataBufferTypeANWBuffer) {
+            if (type == kMetadataBufferTypeGrallocSource) {
+                bufSize = sizeof(VideoGrallocMetadata);
+            } else if (type == kMetadataBufferTypeANWBuffer) {
                 bufSize = sizeof(VideoNativeMetadata);
-            } else if (type == kMetadataBufferTypeNativeHandleSource) {
-                bufSize = sizeof(VideoNativeHandleMetadata);
             }
 
             // If using gralloc or native source input metadata buffers, allocate largest
@@ -816,7 +816,7 @@ status_t ACodec::allocateBuffersOnPort(OMX_U32 portIndex) {
             // may require gralloc source. For camera source, allocate at least enough
             // size for native metadata buffers.
             size_t allottedSize = bufSize;
-            if (portIndex == kPortIndexInput && type == kMetadataBufferTypeANWBuffer) {
+            if (portIndex == kPortIndexInput && type >= kMetadataBufferTypeGrallocSource) {
                 bufSize = max(sizeof(VideoGrallocMetadata), sizeof(VideoNativeMetadata));
             } else if (portIndex == kPortIndexInput && type == kMetadataBufferTypeCameraSource) {
                 bufSize = max(bufSize, sizeof(VideoNativeMetadata));
@@ -879,7 +879,7 @@ status_t ACodec::allocateBuffersOnPort(OMX_U32 portIndex) {
                     mem.clear();
 
                     void *ptr = NULL;
-                    sp<NativeHandle> native_handle;
+                    native_handle_t *native_handle = NULL;
                     err = mOMX->allocateSecureBuffer(
                             mNode, portIndex, bufSize, &info.mBufferID,
                             &ptr, &native_handle);
@@ -892,11 +892,8 @@ status_t ACodec::allocateBuffersOnPort(OMX_U32 portIndex) {
 
                     // TRICKY2: use native handle as the base of the ABuffer if received one,
                     // because Widevine source only receives these base addresses.
-                    const native_handle_t *native_handle_ptr =
-                        native_handle == NULL ? NULL : native_handle->handle();
-                    info.mData = new ABuffer(
-                            ptr != NULL ? ptr : (void *)native_handle_ptr, bufSize);
-                    info.mNativeHandle = native_handle;
+                    info.mData = new ABuffer(ptr != NULL ? ptr : (void *)native_handle, bufSize);
+                    info.mNativeHandle = NativeHandle::create(native_handle, true /* ownsHandle */);
                     info.mCodecData = info.mData;
                 } else if (mQuirks & requiresAllocateBufferBit) {
                     err = mOMX->allocateBufferWithBackup(
@@ -1783,20 +1780,19 @@ status_t ACodec::configureCodec(
 
     int32_t storeMeta;
     if (encoder
-            && msg->findInt32("android._input-metadata-buffer-type", &storeMeta)
-            && storeMeta != kMetadataBufferTypeInvalid) {
-        mInputMetadataType = (MetadataBufferType)storeMeta;
-        err = mOMX->storeMetaDataInBuffers(
-                mNode, kPortIndexInput, OMX_TRUE, &mInputMetadataType);
+            && msg->findInt32("store-metadata-in-buffers", &storeMeta)
+            && storeMeta != 0) {
+        err = mOMX->storeMetaDataInBuffers(mNode, kPortIndexInput, OMX_TRUE, &mInputMetadataType);
         if (err != OK) {
             ALOGE("[%s] storeMetaDataInBuffers (input) failed w/ err %d",
                     mComponentName.c_str(), err);
 
             return err;
-        } else if (storeMeta == kMetadataBufferTypeANWBuffer
-                && mInputMetadataType == kMetadataBufferTypeGrallocSource) {
-            // IOMX translates ANWBuffers to gralloc source already.
-            mInputMetadataType = (MetadataBufferType)storeMeta;
+        }
+        // For this specific case we could be using camera source even if storeMetaDataInBuffers
+        // returns Gralloc source. Pretend that we are; this will force us to use nBufferSize.
+        if (mInputMetadataType == kMetadataBufferTypeGrallocSource) {
+            mInputMetadataType = kMetadataBufferTypeCameraSource;
         }
 
         uint32_t usageBits;
@@ -1842,10 +1838,9 @@ status_t ACodec::configureCodec(
     mIsVideo = video;
     if (encoder && video) {
         OMX_BOOL enable = (OMX_BOOL) (prependSPSPPS
-            && msg->findInt32("android._store-metadata-in-buffers-output", &storeMeta)
+            && msg->findInt32("store-metadata-in-buffers-output", &storeMeta)
             && storeMeta != 0);
 
-        mOutputMetadataType = kMetadataBufferTypeNativeHandleSource;
         err = mOMX->storeMetaDataInBuffers(mNode, kPortIndexOutput, enable, &mOutputMetadataType);
         if (err != OK) {
             ALOGE("[%s] storeMetaDataInBuffers (output) failed w/ err %d",
@@ -1974,7 +1969,6 @@ status_t ACodec::configureCodec(
             }
 
             // Always try to enable dynamic output buffers on native surface
-            mOutputMetadataType = kMetadataBufferTypeANWBuffer;
             err = mOMX->storeMetaDataInBuffers(
                     mNode, kPortIndexOutput, OMX_TRUE, &mOutputMetadataType);
             if (err != OK) {
@@ -5787,8 +5781,7 @@ void ACodec::BaseState::onInputBufferFilled(const sp<AMessage> &msg) {
 
                 OMX_U32 flags = OMX_BUFFERFLAG_ENDOFFRAME;
 
-                MetadataBufferType metaType = mCodec->mInputMetadataType;
-                int32_t isCSD = 0;
+                int32_t isCSD;
                 if (buffer->meta()->findInt32("csd", &isCSD) && isCSD != 0) {
                     if (mCodec->mIsLegacyVP9Decoder) {
                         ALOGV("[%s] is legacy VP9 decoder. Ignore %u codec specific data",
@@ -5797,7 +5790,6 @@ void ACodec::BaseState::onInputBufferFilled(const sp<AMessage> &msg) {
                         break;
                     }
                     flags |= OMX_BUFFERFLAG_CODECCONFIG;
-                    metaType = kMetadataBufferTypeInvalid;
                 }
 
                 if (eos) {
@@ -5811,7 +5803,7 @@ void ACodec::BaseState::onInputBufferFilled(const sp<AMessage> &msg) {
                          buffer.get(), info->mCodecData.get());
 
                     sp<DataConverter> converter = mCodec->mConverter[kPortIndexInput];
-                    if (converter == NULL || isCSD) {
+                    if (converter == NULL) {
                         converter = getCopyConverter();
                     }
                     status_t err = converter->convert(buffer, info->mCodecData);
@@ -5857,50 +5849,14 @@ void ACodec::BaseState::onInputBufferFilled(const sp<AMessage> &msg) {
                     }
                 }
                 info->checkReadFence("onInputBufferFilled");
-
-                status_t err2 = OK;
-                switch (metaType) {
-                case kMetadataBufferTypeInvalid:
-                    break;
-#ifndef OMX_ANDROID_COMPILE_AS_32BIT_ON_64BIT_PLATFORMS
-                case kMetadataBufferTypeNativeHandleSource:
-                    if (info->mCodecData->size() >= sizeof(VideoNativeHandleMetadata)) {
-                        VideoNativeHandleMetadata *vnhmd =
-                            (VideoNativeHandleMetadata*)info->mCodecData->base();
-                        err2 = mCodec->mOMX->updateNativeHandleInMeta(
-                                mCodec->mNode, kPortIndexInput,
-                                NativeHandle::create(vnhmd->pHandle, false /* ownsHandle */),
-                                bufferID);
-                    }
-                    break;
-                case kMetadataBufferTypeANWBuffer:
-                    if (info->mCodecData->size() >= sizeof(VideoNativeMetadata)) {
-                        VideoNativeMetadata *vnmd = (VideoNativeMetadata*)info->mCodecData->base();
-                        err2 = mCodec->mOMX->updateGraphicBufferInMeta(
-                                mCodec->mNode, kPortIndexInput,
-                                new GraphicBuffer(vnmd->pBuffer, false /* keepOwnership */),
-                                bufferID);
-                    }
-                    break;
-#endif
-                default:
-                    ALOGW("Can't marshall %s data in %zu sized buffers in %zu-bit mode",
-                            asString(metaType), info->mCodecData->size(),
-                            sizeof(buffer_handle_t) * 8);
-                    err2 = ERROR_UNSUPPORTED;
-                    break;
-                }
-
-                if (err2 == OK) {
-                    err2 = mCodec->mOMX->emptyBuffer(
-                        mCodec->mNode,
-                        bufferID,
-                        0,
-                        info->mCodecData->size(),
-                        flags,
-                        timeUs,
-                        info->mFenceFd);
-                }
+                status_t err2 = mCodec->mOMX->emptyBuffer(
+                    mCodec->mNode,
+                    bufferID,
+                    0,
+                    info->mCodecData->size(),
+                    flags,
+                    timeUs,
+                    info->mFenceFd);
                 info->mFenceFd = -1;
                 if (err2 != OK) {
                     mCodec->signalError(OMX_ErrorUndefined, makeNoSideEffectStatus(err2));
@@ -6090,15 +6046,18 @@ bool ACodec::BaseState::onOMXFillBufferDone(
 
             if (mCodec->usingMetadataOnEncoderOutput()) {
                 native_handle_t *handle = NULL;
-                VideoNativeHandleMetadata &nativeMeta =
-                    *(VideoNativeHandleMetadata *)info->mData->data();
-                if (info->mData->size() >= sizeof(nativeMeta)
-                        && nativeMeta.eType == kMetadataBufferTypeNativeHandleSource) {
+                VideoGrallocMetadata &grallocMeta = *(VideoGrallocMetadata *)info->mData->data();
+                VideoNativeMetadata &nativeMeta = *(VideoNativeMetadata *)info->mData->data();
+                if (info->mData->size() >= sizeof(grallocMeta)
+                        && grallocMeta.eType == kMetadataBufferTypeGrallocSource) {
+                    handle = (native_handle_t *)(uintptr_t)grallocMeta.pHandle;
+                } else if (info->mData->size() >= sizeof(nativeMeta)
+                        && nativeMeta.eType == kMetadataBufferTypeANWBuffer) {
 #ifdef OMX_ANDROID_COMPILE_AS_32BIT_ON_64BIT_PLATFORMS
-                    // handle is only valid on 32-bit/mediaserver process
+                    // ANativeWindowBuffer is only valid on 32-bit/mediaserver process
                     handle = NULL;
 #else
-                    handle = (native_handle_t *)nativeMeta.pHandle;
+                    handle = (native_handle_t *)nativeMeta.pBuffer->handle;
 #endif
                 }
                 info->mData->meta()->setPointer("handle", handle);
@@ -6799,14 +6758,8 @@ void ACodec::LoadedState::onCreateInputSurface(
 
     sp<IGraphicBufferProducer> bufferProducer;
     if (err == OK) {
-        mCodec->mInputMetadataType = kMetadataBufferTypeANWBuffer;
         err = mCodec->mOMX->createInputSurface(
-                mCodec->mNode, kPortIndexInput, dataSpace, &bufferProducer,
-                &mCodec->mInputMetadataType);
-        // framework uses ANW buffers internally instead of gralloc handles
-        if (mCodec->mInputMetadataType == kMetadataBufferTypeGrallocSource) {
-            mCodec->mInputMetadataType = kMetadataBufferTypeANWBuffer;
-        }
+                mCodec->mNode, kPortIndexInput, dataSpace, &bufferProducer, &mCodec->mInputMetadataType);
     }
 
     if (err == OK) {
@@ -6845,14 +6798,9 @@ void ACodec::LoadedState::onSetInputSurface(
     notify->setMessage("output-format", mCodec->mOutputFormat);
 
     if (err == OK) {
-        mCodec->mInputMetadataType = kMetadataBufferTypeANWBuffer;
         err = mCodec->mOMX->setInputSurface(
                 mCodec->mNode, kPortIndexInput, surface->getBufferConsumer(),
                 &mCodec->mInputMetadataType);
-        // framework uses ANW buffers internally instead of gralloc handles
-        if (mCodec->mInputMetadataType == kMetadataBufferTypeGrallocSource) {
-            mCodec->mInputMetadataType = kMetadataBufferTypeANWBuffer;
-        }
     }
 
     if (err == OK) {

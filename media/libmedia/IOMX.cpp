@@ -25,7 +25,6 @@
 #include <media/IOMX.h>
 #include <media/stagefright/foundation/ADebug.h>
 #include <media/openmax/OMX_IndexExt.h>
-#include <utils/NativeHandle.h>
 #include <media/AVMediaExtensions.h>
 
 namespace android {
@@ -62,7 +61,6 @@ enum {
     SET_INTERNAL_OPTION,
     UPDATE_GRAPHIC_BUFFER_IN_META,
     CONFIGURE_VIDEO_TUNNEL_MODE,
-    UPDATE_NATIVE_HANDLE_IN_META,
 };
 
 class BpOMX : public BpInterface<IOMX> {
@@ -317,24 +315,6 @@ public:
         return err;
     }
 
-    virtual status_t updateNativeHandleInMeta(
-            node_id node, OMX_U32 port_index,
-            const sp<NativeHandle> &nativeHandle, buffer_id buffer) {
-        Parcel data, reply;
-        data.writeInterfaceToken(IOMX::getInterfaceDescriptor());
-        data.writeInt32((int32_t)node);
-        data.writeInt32(port_index);
-        data.writeInt32(nativeHandle != NULL);
-        if (nativeHandle != NULL) {
-            data.writeNativeHandle(nativeHandle->handle());
-        }
-        data.writeInt32((int32_t)buffer);
-        remote()->transact(UPDATE_NATIVE_HANDLE_IN_META, data, &reply);
-
-        status_t err = reply.readInt32();
-        return err;
-    }
-
     virtual status_t createInputSurface(
             node_id node, OMX_U32 port_index, android_dataspace dataSpace,
             sp<IGraphicBufferProducer> *bufferProducer, MetadataBufferType *type) {
@@ -438,9 +418,7 @@ public:
         data.writeInterfaceToken(IOMX::getInterfaceDescriptor());
         data.writeInt32((int32_t)node);
         data.writeInt32(port_index);
-        data.writeInt32((int32_t)enable);
-        data.writeInt32(type == NULL ? kMetadataBufferTypeANWBuffer : *type);
-
+        data.writeInt32((uint32_t)enable);
         remote()->transact(STORE_META_DATA_IN_BUFFERS, data, &reply);
 
         // read type even storeMetaDataInBuffers failed
@@ -489,7 +467,7 @@ public:
 
     virtual status_t allocateSecureBuffer(
             node_id node, OMX_U32 port_index, size_t size,
-            buffer_id *buffer, void **buffer_data, sp<NativeHandle> *native_handle) {
+            buffer_id *buffer, void **buffer_data, native_handle_t **native_handle) {
         Parcel data, reply;
         data.writeInterfaceToken(IOMX::getInterfaceDescriptor());
         data.writeInt32((int32_t)node);
@@ -508,8 +486,7 @@ public:
         *buffer = (buffer_id)reply.readInt32();
         *buffer_data = (void *)reply.readInt64();
         if (*buffer_data == NULL) {
-            *native_handle = NativeHandle::create(
-                    reply.readNativeHandle(), true /* ownsHandle */);
+            *native_handle = reply.readNativeHandle();
         } else {
             *native_handle = NULL;
         }
@@ -934,25 +911,6 @@ status_t BnOMX::onTransact(
             return NO_ERROR;
         }
 
-        case UPDATE_NATIVE_HANDLE_IN_META:
-        {
-            CHECK_OMX_INTERFACE(IOMX, data, reply);
-
-            node_id node = (node_id)data.readInt32();
-            OMX_U32 port_index = data.readInt32();
-            native_handle *handle = NULL;
-            if (data.readInt32()) {
-                handle = data.readNativeHandle();
-            }
-            buffer_id buffer = (buffer_id)data.readInt32();
-
-            status_t err = updateNativeHandleInMeta(
-                    node, port_index, NativeHandle::create(handle, true /* ownshandle */), buffer);
-            reply->writeInt32(err);
-
-            return NO_ERROR;
-        }
-
         case CREATE_INPUT_SURFACE:
         {
             CHECK_OMX_INTERFACE(IOMX, data, reply);
@@ -1046,7 +1004,7 @@ status_t BnOMX::onTransact(
             OMX_U32 port_index = data.readInt32();
             OMX_BOOL enable = (OMX_BOOL)data.readInt32();
 
-            MetadataBufferType type = (MetadataBufferType)data.readInt32();
+            MetadataBufferType type = kMetadataBufferTypeInvalid;
             status_t err = storeMetaDataInBuffers(node, port_index, enable, &type);
 
             reply->writeInt32(type);
@@ -1108,7 +1066,7 @@ status_t BnOMX::onTransact(
 
             buffer_id buffer;
             void *buffer_data = NULL;
-            sp<NativeHandle> native_handle;
+            native_handle_t *native_handle = NULL;
             status_t err = allocateSecureBuffer(
                     node, port_index, size, &buffer, &buffer_data, &native_handle);
             reply->writeInt32(err);
@@ -1117,7 +1075,7 @@ status_t BnOMX::onTransact(
                 reply->writeInt32((int32_t)buffer);
                 reply->writeInt64((uintptr_t)buffer_data);
                 if (buffer_data == NULL) {
-                    reply->writeNativeHandle(native_handle == NULL ? NULL : native_handle->handle());
+                    reply->writeNativeHandle(native_handle);
                 }
             }
 
