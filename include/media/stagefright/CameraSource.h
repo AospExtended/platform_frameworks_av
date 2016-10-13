@@ -28,6 +28,7 @@
 #include <utils/List.h>
 #include <utils/RefBase.h>
 #include <utils/String16.h>
+#include <MetadataBufferType.h>
 
 namespace android {
 
@@ -118,11 +119,11 @@ public:
      * Tell whether this camera source stores meta data or real YUV
      * frame data in video buffers.
      *
-     * @return true if meta data is stored in the video
-     *      buffers; false if real YUV data is stored in
+     * @return a valid type if meta data is stored in the video
+     *      buffers; kMetadataBufferTypeInvalid if real YUV data is stored in
      *      the video buffers.
      */
-    bool isMetaDataStoredInVideoBuffers() const;
+    MetadataBufferType metaDataStoredInVideoBuffers() const;
 
     virtual void signalBufferReturned(MediaBuffer* buffer);
 
@@ -138,6 +139,8 @@ protected:
         ProxyListener(const sp<CameraSource>& source);
         virtual void dataCallbackTimestamp(int64_t timestampUs, int32_t msgType,
                 const sp<IMemory> &data);
+        virtual void recordingFrameHandleCallbackTimestamp(int64_t timestampUs,
+                native_handle_t* handle);
 
     private:
         sp<CameraSource> mSource;
@@ -209,6 +212,7 @@ protected:
 
     virtual status_t startCameraRecording();
     virtual void releaseRecordingFrame(const sp<IMemory>& frame);
+    virtual void releaseRecordingFrameHandle(native_handle_t* handle);
 
     // Returns true if need to skip the current frame.
     // Called from dataCallbackTimestamp.
@@ -219,6 +223,9 @@ protected:
 
     virtual void dataCallbackTimestamp(int64_t timestampUs, int32_t msgType,
             const sp<IMemory> &data);
+
+    virtual void recordingFrameHandleCallbackTimestamp(int64_t timestampUs,
+            native_handle_t* handle);
 
     // Process a buffer item received in BufferQueueListener.
     virtual void processBufferQueueFrame(BufferItem& buffer);
@@ -244,6 +251,8 @@ private:
     // The mode video buffers are received from camera. One of VIDEO_BUFFER_MODE_*.
     int32_t mVideoBufferMode;
 
+    static const uint32_t kDefaultVideoBufferCount = 32;
+
     /**
      * The following variables are used in VIDEO_BUFFER_MODE_BUFFER_QUEUE mode.
      */
@@ -264,6 +273,7 @@ private:
 
     void releaseQueuedFrames();
     void releaseOneRecordingFrame(const sp<IMemory>& frame);
+    void createVideoBufferMemoryHeap(size_t size, uint32_t bufferCount);
 
     status_t init(const sp<hardware::ICamera>& camera, const sp<ICameraRecordingProxy>& proxy,
                   int32_t cameraId, const String16& clientName, uid_t clientUid, pid_t clientPid,

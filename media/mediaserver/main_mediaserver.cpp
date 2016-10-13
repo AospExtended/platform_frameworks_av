@@ -28,7 +28,6 @@
 #include "IcuUtils.h"
 #include "MediaPlayerService.h"
 #include "ResourceManagerService.h"
-#include "CameraService.h"
 
 using namespace android;
 
@@ -42,7 +41,6 @@ int main(int argc __unused, char **argv __unused)
     InitializeIcuOrDie();
     MediaPlayerService::instantiate();
     ResourceManagerService::instantiate();
-    CameraService::instantiate();
     registerExtensions();
     ProcessState::self()->startThreadPool();
     IPCThreadState::self()->joinThreadPool();
