@@ -969,7 +969,9 @@ void MediaCodecSource::onMessageReceived(const sp<AMessage> &msg) {
              break;
         }
 
-        signalEOS();
+        signalEOS(err);
+
+        releaseEncoder();
 
         if (!(mFlags & FLAG_USE_SURFACE_INPUT)) {
             ALOGV("source (%s) stopping", mIsVideo ? "video" : "audio");
