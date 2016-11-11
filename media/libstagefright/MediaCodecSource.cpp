@@ -969,8 +969,6 @@ void MediaCodecSource::onMessageReceived(const sp<AMessage> &msg) {
              break;
         }
 
-        signalEOS(err);
-
         releaseEncoder();
 
         if (!(mFlags & FLAG_USE_SURFACE_INPUT)) {
