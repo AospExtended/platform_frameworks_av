@@ -2521,6 +2521,82 @@ status_t ACodec::setIntraRefreshPeriod(uint32_t intraRefreshPeriod, bool inConfi
     return OK;
 }
 
+status_t ACodec::configureTemporalLayers(
+        uint32_t numLayers, uint32_t numBLayers, bool inConfigure,
+        sp<AMessage> &outputFormat) {
+    if (!mIsVideo || !mIsEncoder) {
+        return INVALID_OPERATION;
+    }
+
+    OMX_VIDEO_PARAM_ANDROID_TEMPORALLAYERINGTYPE layerParams;
+    InitOMXParams(&layerParams);
+    layerParams.nPortIndex = kPortIndexOutput;
+    status_t err = mOMX->getParameter(
+            mNode, (OMX_INDEXTYPE)OMX_IndexParamAndroidVideoTemporalLayering,
+            &layerParams, sizeof(layerParams));
+
+    if (err != OK) {
+        return err;
+    }
+
+    if (numLayers > layerParams.nLayerCountMax ||
+            numBLayers > layerParams.nBLayerCountMax) {
+        ALOGE("Requested temporal layer count (total=%u B=%u) exceeds max (total=%d B=%d)",
+            numLayers, numBLayers, layerParams.nLayerCountMax,
+            layerParams.nBLayerCountMax);
+        return ERROR_UNSUPPORTED;
+    }
+
+    if (!inConfigure) {
+        OMX_VIDEO_CONFIG_ANDROID_TEMPORALLAYERINGTYPE layerConfig;
+        InitOMXParams(&layerConfig);
+        layerConfig.nPLayerCountActual = numLayers - numBLayers;
+        layerConfig.nBLayerCountActual = numBLayers;
+        layerConfig.bBitrateRatiosSpecified = OMX_FALSE;
+        layerConfig.nPortIndex = kPortIndexOutput;
+        layerConfig.ePattern = OMX_VIDEO_AndroidTemporalLayeringPatternAndroid;
+        err = mOMX->setConfig(
+                mNode, (OMX_INDEXTYPE)OMX_IndexConfigAndroidVideoTemporalLayering,
+                &layerConfig, sizeof(layerConfig));
+        return err;
+    }
+
+    layerParams.nPLayerCountActual = numLayers - numBLayers;
+    layerParams.nBLayerCountActual = numBLayers;
+    layerParams.bBitrateRatiosSpecified = OMX_FALSE;
+    layerParams.ePattern = OMX_VIDEO_AndroidTemporalLayeringPatternAndroid;
+    err = mOMX->setParameter(
+            mNode, (OMX_INDEXTYPE)OMX_IndexParamAndroidVideoTemporalLayering,
+            &layerParams, sizeof(layerParams));
+
+    if (err != OK) {
+        return err;
+    }
+
+    err = mOMX->getParameter(
+            mNode, (OMX_INDEXTYPE)OMX_IndexParamAndroidVideoTemporalLayering,
+            &layerParams, sizeof(layerParams));
+
+    if (err != OK) {
+        return err;
+    }
+
+    ALOGI("Temporal layers requested (total=%u B=%u) v/s configured (total=%u B=%u)",
+            numLayers, numBLayers, layerParams.nPLayerCountActual,
+            layerParams.nBLayerCountActual);
+
+#if 0
+    mOutputFormat = mOutputFormat->dup();
+    mOutputFormat->setInt32("num-temporal-layers",
+            layerParams.nPLayerCountActual + layerParams.nBLayerCountActual);
+    mOutputFormat->setInt32("num-temporal-b-layers", layerParams.nBLayerCountActual);
+#endif
+    outputFormat->setInt32("num-temporal-layers",
+            layerParams.nPLayerCountActual + layerParams.nBLayerCountActual);
+
+    return err;
+}
+
 status_t ACodec::setMinBufferSize(OMX_U32 portIndex, size_t size) {
     OMX_PARAM_PORTDEFINITIONTYPE def;
     InitOMXParams(&def);
@@ -3818,6 +3894,24 @@ status_t ACodec::setupVideoEncoder(
         err = OK;
     }
 
+    if (compressionFormat == OMX_VIDEO_CodingAVC ||
+            compressionFormat == OMX_VIDEO_CodingHEVC) {
+        int32_t numLayers = 0;
+        int32_t numBLayers = 0;
+        if (msg->findInt32("num-temporal-layers", &numLayers)) {
+            msg->findInt32("num-temporal-b-layers", &numBLayers);
+            err = configureTemporalLayers(numLayers, numBLayers, true, outputFormat);
+            if (err != OK) {
+                ALOGE("Configuring temporal layers (P=%d B=%d) failed: %d",
+                        numLayers, numBLayers, err);
+                // not a fatal error, set error code to OK
+                // This will avoid tear down of session where temporal
+                // layer encoding is not supported for some chipsets
+                err = OK;
+            }
+        }
+    }
+
     if (err == OK) {
         ALOGI("setupVideoEncoder succeeded");
     }
@@ -4430,7 +4524,7 @@ status_t ACodec::setupErrorCorrectionParameters() {
 
     errorCorrectionType.bEnableHEC = OMX_FALSE;
     errorCorrectionType.bEnableResync = OMX_TRUE;
-    errorCorrectionType.nResynchMarkerSpacing = 256;
+    errorCorrectionType.nResynchMarkerSpacing = 0;
     errorCorrectionType.bEnableDataPartitioning = OMX_FALSE;
     errorCorrectionType.bEnableRVLC = OMX_FALSE;
 
@@ -7408,6 +7502,18 @@ status_t ACodec::setParameters(const sp<AMessage> &params) {
         }
     }
 
+    int32_t numLayers = 0,
+            numBLayers = 0;
+    if (params->findInt32("num-temporal-layers", &numLayers)) {
+        params->findInt32("num-temporal-b-layers", &numBLayers);
+        status_t err = configureTemporalLayers(numLayers, numBLayers, false, mOutputFormat);
+        if (err != OK) {
+            ALOGE("Dynamic configuration of temporal layers (P=%d B=%d) failed: %d",
+                    numLayers, numBLayers, err);
+            err = OK;
+        }
+    }
+
     return OK;
 }
 
@@ -8169,6 +8275,57 @@ status_t ACodec::getOMXChannelMapping(size_t numChannels, OMX_AUDIO_CHANNELTYPE 
     }
 
     return OK;
+}
+
+void ACodec::setBFrames(
+        OMX_VIDEO_PARAM_MPEG4TYPE *mpeg4type) {
+    //ignore non QC components
+    if (strncmp(mComponentName.c_str(), "OMX.qcom.", 9)) {
+        return;
+    }
+    if (mpeg4type->eProfile > OMX_VIDEO_MPEG4ProfileSimple) {
+        mpeg4type->nAllowedPictureTypes |= OMX_VIDEO_PictureTypeB;
+        mpeg4type->nPFrames = (mpeg4type->nPFrames + kNumBFramesPerPFrame) /
+                (kNumBFramesPerPFrame + 1);
+        mpeg4type->nBFrames = mpeg4type->nPFrames * kNumBFramesPerPFrame;
+    }
+    return;
+}
+
+void ACodec::setBFrames(
+        OMX_VIDEO_PARAM_AVCTYPE *h264type, const int32_t iFramesInterval,
+        const int32_t frameRate) {
+    //ignore non QC components
+    if (strncmp(mComponentName.c_str(), "OMX.qcom.", 9)) {
+        return;
+    }
+    OMX_U32 val = 0;
+    if (iFramesInterval < 0) {
+        val =  0xFFFFFFFF;
+    } else if (iFramesInterval == 0) {
+        val = 0;
+    } else {
+        val  = frameRate * iFramesInterval - 1;
+        CHECK(val > 1);
+    }
+
+    h264type->nPFrames = val;
+
+    if (h264type->nPFrames == 0) {
+        h264type->nAllowedPictureTypes = OMX_VIDEO_PictureTypeI;
+    }
+
+    if (h264type->eProfile > OMX_VIDEO_AVCProfileBaseline) {
+        h264type->nAllowedPictureTypes |= OMX_VIDEO_PictureTypeB;
+        h264type->nPFrames = (h264type->nPFrames + kNumBFramesPerPFrame) /
+                (kNumBFramesPerPFrame + 1);
+        h264type->nBFrames = h264type->nPFrames * kNumBFramesPerPFrame;
+
+        //enable CABAC as default entropy mode for High/Main profiles
+        h264type->bEntropyCodingCABAC = OMX_TRUE;
+        h264type->nCabacInitIdc = 0;
+    }
+    return;
 }
 
 }  // namespace android

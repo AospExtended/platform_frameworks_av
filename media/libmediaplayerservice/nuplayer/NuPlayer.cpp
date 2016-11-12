@@ -790,6 +790,10 @@ void NuPlayer::onMessageReceived(const sp<AMessage> &msg) {
                     sp<AMessage> params = new AMessage();
                     params->setFloat("operating-rate", rate * mPlaybackSettings.mSpeed);
                     mVideoDecoder->setParameters(params);
+
+                    params = new AMessage();
+                    params->setFloat("playback-speed", mPlaybackSettings.mSpeed);
+                    mVideoDecoder->setParameters(params);
                 }
             }
 
@@ -1159,6 +1163,7 @@ void NuPlayer::onMessageReceived(const sp<AMessage> &msg) {
                 if (reason == Renderer::kDueToTimeout && !(mPaused && mOffloadAudio)) {
                     // TimeoutWhenPaused is only for offload mode.
                     ALOGW("Receive a stale message for teardown.");
+                    mRenderer->signalAudioTearDownComplete();
                     break;
                 }
                 closeAudioSink();
@@ -1695,6 +1700,22 @@ status_t NuPlayer::instantiateDecoder(
             return err;
         }
     }
+
+    if (!audio) {
+        sp<MetaData> fileMeta = getFileMeta();
+        if (fileMeta == NULL) {
+            ALOGW("source has video meta but not file meta");
+            return -1;
+        }
+
+        int32_t videoTemporalLayerCount = 0;
+        if (fileMeta->findInt32(kKeyTemporalLayerCount, &videoTemporalLayerCount)
+                && videoTemporalLayerCount > 0) {
+            sp<AMessage> params = new AMessage();
+            params->setInt32("temporal-layer-count", videoTemporalLayerCount);
+            (*decoder)->setParameters(params);
+        }
+    }
     return OK;
 }
 
@@ -2004,9 +2025,6 @@ void NuPlayer::performDecoderFlush(FlushCommand audio, FlushCommand video) {
 
 void NuPlayer::performReset() {
     ALOGV("performReset");
-
-    CHECK(mAudioDecoder == NULL);
-    CHECK(mVideoDecoder == NULL);
 
     cancelPollDuration();
 
