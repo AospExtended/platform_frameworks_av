@@ -77,6 +77,10 @@ class FLACParser : public RefBase {
 friend class FLACSource;
 
 public:
+    enum {
+        kMaxChannels = 8,
+    };
+
     FLACParser(
         const sp<DataSource> &dataSource,
         // If metadata pointers aren't provided, we don't fill them
@@ -493,7 +497,7 @@ status_t FLACParser::init()
     }
     if (mStreamInfoValid) {
         // check channel count
-        if (getChannels() == 0 || getChannels() > 8) {
+        if (getChannels() == 0 || getChannels() > kMaxChannels) {
             ALOGE("unsupported channel count %u", getChannels());
             return NO_INIT;
         }
