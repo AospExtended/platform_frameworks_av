@@ -39,5 +39,4 @@ cc_library_shared {
         "libcutils",
         "liblog",
     ],
-    compile_multilib: "32",
 }
