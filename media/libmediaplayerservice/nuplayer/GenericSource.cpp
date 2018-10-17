@@ -57,6 +57,12 @@ NuPlayer::GenericSource::GenericSource(
         uid_t uid,
         const sp<MediaClock> &mediaClock)
     : Source(notify),
+//OFFLOAD BEGIN
+      mIsForOffload(false),
+      mFirstDequeuedBufferRealUs(-1ll),
+      mFirstDequeuedBufferMediaUs(-1ll),
+      mlastDequeuedBufferMediaUs(-1ll),
+//OFFLOAD END
       mAudioTimeUs(0),
       mAudioLastDequeueTimeUs(0),
       mVideoTimeUs(0),
@@ -482,6 +488,9 @@ void NuPlayer::GenericSource::finishPrepareAsync() {
     }
 
     if (mIsStreaming) {
+        mFirstDequeuedBufferRealUs = -1ll;
+        mFirstDequeuedBufferMediaUs = -1ll;
+        mlastDequeuedBufferMediaUs = -1ll;
         mCachedSource->resumeFetchingIfNecessary();
         mPreparing = true;
         schedulePollBuffering();
@@ -816,6 +825,17 @@ sp<MetaData> NuPlayer::GenericSource::getFormatMeta_l(bool audio) {
     return source->getFormat();
 }
 
+void NuPlayer::GenericSource::updateDequeuedBufferTime(int64_t mediaUs) {
+    if (mediaUs < 0) {
+        mFirstDequeuedBufferRealUs = -1ll;
+        mFirstDequeuedBufferMediaUs = -1ll;
+    } else if (mFirstDequeuedBufferRealUs < 0) {
+        mFirstDequeuedBufferRealUs = ALooper::GetNowUs();
+        mFirstDequeuedBufferMediaUs = mediaUs;
+    }
+    mlastDequeuedBufferMediaUs = mediaUs;
+}
+
 status_t NuPlayer::GenericSource::dequeueAccessUnit(
         bool audio, sp<ABuffer> *accessUnit) {
     Mutex::Autolock _l(mLock);
@@ -862,12 +882,22 @@ status_t NuPlayer::GenericSource::dequeueAccessUnit(
             }
             if (track->mPackets->getAvailableBufferCount(&finalResult) < 2
                 && !mSentPauseOnBuffering && !mPreparing) {
-                mCachedSource->resumeFetchingIfNecessary();
-                sendCacheStats();
-                mSentPauseOnBuffering = true;
-                sp<AMessage> notify = dupNotify();
-                notify->setInt32("what", kWhatPauseOnBufferingStart);
-                notify->post();
+                if (mIsForOffload && mFirstDequeuedBufferRealUs >= 0) {
+                    int64_t downStreamCacheUs =
+                        mlastDequeuedBufferMediaUs - mFirstDequeuedBufferMediaUs
+                            - (ALooper::GetNowUs() - mFirstDequeuedBufferRealUs);
+                    if (downStreamCacheUs > 0) {
+                        durationUs += downStreamCacheUs;
+                    }
+                }
+                if (!mIsForOffload || durationUs < restartBufferingMarkUs) {
+                    mCachedSource->resumeFetchingIfNecessary();
+                    sendCacheStats();
+                    mSentPauseOnBuffering = true;
+                    sp<AMessage> notify = dupNotify();
+                    notify->setInt32("what", kWhatPauseOnBufferingStart);
+                    notify->post();
+                }
             }
         }
     }
@@ -888,6 +918,7 @@ status_t NuPlayer::GenericSource::dequeueAccessUnit(
     status_t eosResult; // ignored
     CHECK((*accessUnit)->meta()->findInt64("timeUs", &timeUs));
     if (audio) {
+        updateDequeuedBufferTime(timeUs);
         mAudioLastDequeueTimeUs = timeUs;
     } else {
         mVideoLastDequeueTimeUs = timeUs;
@@ -1132,6 +1163,7 @@ void NuPlayer::GenericSource::onSeek(const sp<AMessage>& msg) {
 }
 
 status_t NuPlayer::GenericSource::doSeek(int64_t seekTimeUs, MediaPlayerSeekMode mode) {
+    updateDequeuedBufferTime(-1ll);
     if (mVideoTrack.mSource != NULL) {
         ++mVideoDataGeneration;
 
@@ -1488,6 +1520,19 @@ void NuPlayer::GenericSource::queueDiscontinuityIfNeeded(
         track->mPackets->queueDiscontinuity(type, NULL /* extra */, true /* discard */);
     }
 }
+
+//OFFLOAD BEGIN
+void NuPlayer::GenericSource::setSourceForOffload(bool isForOffload) {
+    mIsForOffload = isForOffload;
+}
+
+void NuPlayer::GenericSource::resetOffloadTrackPacket() {
+     if (mAudioTrack.mPackets != NULL) {
+        ALOGI("%s", __FUNCTION__);
+        mAudioTrack.mPackets->clear();
+     }
+}
+//OFFLOAD END
 
 void NuPlayer::GenericSource::notifyBufferingUpdate(int32_t percentage) {
     // Buffering percent could go backward as it's estimated from remaining

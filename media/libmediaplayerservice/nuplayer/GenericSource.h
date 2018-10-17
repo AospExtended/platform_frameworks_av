@@ -85,6 +85,14 @@ struct NuPlayer::GenericSource : public NuPlayer::Source,
 
     virtual bool isStreaming() const;
 
+//OFFLOAD BEGIN
+    virtual void setSourceForOffload(const bool isForOffload);
+
+    virtual void resetOffloadTrackPacket();
+
+    virtual void updateDequeuedBufferTime(int64_t mediaUs);
+//OFFLOAD END
+
     // Modular DRM
     virtual void signalBufferReturned(MediaBufferBase *buffer);
 
@@ -102,6 +110,12 @@ protected:
     virtual sp<MetaData> getFormatMeta(bool audio);
 
 private:
+//OFFLOAD BEGIN
+    bool mIsForOffload;
+    int64_t mFirstDequeuedBufferRealUs;
+    int64_t mFirstDequeuedBufferMediaUs;
+    int64_t mlastDequeuedBufferMediaUs;
+//OFFLOAD END
     enum {
         kWhatPrepareAsync,
         kWhatFetchSubtitleData,
