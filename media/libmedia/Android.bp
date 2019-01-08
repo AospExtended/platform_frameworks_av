@@ -258,6 +258,15 @@ cc_library {
             cfi: true,
         },
     },
+
+    product_variables: {
+        aosp: {
+            uses_aosp_wfd: {
+                cflags: ["-DUSES_AOSP_WFD"],
+                srcs: ["IHDCP.cpp"],
+            },
+        },
+    },
 }
 
 cc_library {

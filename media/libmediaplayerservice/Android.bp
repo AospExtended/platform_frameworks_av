@@ -72,6 +72,20 @@ cc_library_shared {
         },
     },
 
+    product_variables: {
+        aosp: {
+            uses_aosp_wfd: {
+                srcs: [
+                    "HDCP.cpp",
+                    "RemoteDisplay.cpp",
+                ],
+                shared_libs: ["libstagefright_wfd"],
+                include_dirs: ["frameworks/av/media/libstagefright/wifi-display"],
+                cflags: ["-DUSES_AOSP_WFD"],
+            },
+        },
+    },
+
 }
 
 subdirs = ["*"]
