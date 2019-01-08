@@ -264,6 +264,7 @@ cc_library {
             uses_aosp_wfd: {
                 cflags: ["-DUSES_AOSP_WFD"],
                 srcs: ["IHDCP.cpp"],
+                shared_libs: ["libui"],
             },
         },
     },
