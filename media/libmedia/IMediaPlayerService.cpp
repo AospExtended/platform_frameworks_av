@@ -29,6 +29,10 @@
 #include <media/IRemoteDisplayClient.h>
 #include <media/IStreamSource.h>
 
+#ifdef USES_AOSP_WFD
+#include <media/IHDCP.h>
+#endif
+
 #include <utils/Errors.h>  // for status_t
 #include <utils/String8.h>
 
@@ -38,6 +42,9 @@ enum {
     CREATE = IBinder::FIRST_CALL_TRANSACTION,
     CREATE_MEDIA_RECORDER,
     CREATE_METADATA_RETRIEVER,
+#ifdef USES_AOSP_WFD
+    MAKE_HDCP,
+#endif
     ADD_BATTERY_DATA,
     PULL_BATTERY_DATA,
     LISTEN_FOR_REMOTE_DISPLAY,
@@ -79,6 +86,16 @@ public:
         remote()->transact(CREATE_MEDIA_RECORDER, data, &reply);
         return interface_cast<IMediaRecorder>(reply.readStrongBinder());
     }
+
+#ifdef USES_AOSP_WFD
+    virtual sp<IHDCP> makeHDCP(bool createEncryptionModule) {
+        Parcel data, reply;
+        data.writeInterfaceToken(IMediaPlayerService::getInterfaceDescriptor());
+        data.writeInt32(createEncryptionModule);
+        remote()->transact(MAKE_HDCP, data, &reply);
+        return interface_cast<IHDCP>(reply.readStrongBinder());
+    }
+#endif
 
     virtual void addBatteryData(uint32_t params) {
         Parcel data, reply;
@@ -143,6 +160,15 @@ status_t BnMediaPlayerService::onTransact(
             reply->writeStrongBinder(IInterface::asBinder(retriever));
             return NO_ERROR;
         } break;
+#ifdef USES_AOSP_WFD
+        case MAKE_HDCP: {
+            CHECK_INTERFACE(IMediaPlayerService, data, reply);
+            bool createEncryptionModule = data.readInt32();
+            sp<IHDCP> hdcp = makeHDCP(createEncryptionModule);
+            reply->writeStrongBinder(IInterface::asBinder(hdcp));
+            return NO_ERROR;
+        } break;
+#endif
         case ADD_BATTERY_DATA: {
             CHECK_INTERFACE(IMediaPlayerService, data, reply);
             uint32_t params = data.readInt32();

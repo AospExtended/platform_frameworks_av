@@ -331,5 +331,6 @@ subdirs = [
     "tests",
     "timedtext",
     "webm",
+    "wifi-display",
     "xmlparser",
 ]
