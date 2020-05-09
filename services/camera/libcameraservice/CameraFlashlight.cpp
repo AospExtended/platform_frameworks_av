@@ -512,22 +512,6 @@ status_t CameraHardwareInterfaceFlashControl::initializePreviewWindow(
     return device->setPreviewWindow(mSurface);
 }
 
-static void notifyCallback(int32_t, int32_t, int32_t, void*) {
-    /* Empty */
-}
-
-static void dataCallback(int32_t, const sp<IMemory>&, camera_frame_metadata_t*, void*) {
-    /* Empty */
-}
-
-static void dataCallbackTimestamp(nsecs_t, int32_t, const sp<IMemory>&, void*) {
-    /* Empty */
-}
-
-static void dataCallbackTimestampBatch(int32_t, const std::vector<HandleTimestampMessage>&,
-        void*) {
-    /* Empty */
-}
 status_t CameraHardwareInterfaceFlashControl::connectCameraDevice(
         const String8& cameraId) {
     sp<CameraHardwareInterface> device =
@@ -541,8 +525,7 @@ status_t CameraHardwareInterfaceFlashControl::connectCameraDevice(
     }
 
     // need to set __get_memory in set_callbacks().
-    device->setCallbacks(notifyCallback, dataCallback, dataCallbackTimestamp, 
-            dataCallbackTimestampBatch, this);
+    device->setCallbacks(NULL, NULL, NULL, NULL, NULL);
 
     mParameters = device->getParameters();
 
