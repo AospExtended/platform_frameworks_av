@@ -18,6 +18,7 @@
 #define LOG_TAG "mediaserver"
 //#define LOG_NDEBUG 0
 
+#include <aicu/AIcu.h>
 #include <binder/IPCThreadState.h>
 #include <binder/ProcessState.h>
 #include <binder/IServiceManager.h>
@@ -25,7 +26,10 @@
 #include "RegisterExtensions.h"
 
 // from LOCAL_C_INCLUDES
-#include "IcuUtils.h"
+#ifdef NO_CAMERA_SERVER
+#include "CameraService.h"
+#include <hidl/HidlTransportSupport.h>
+#endif
 #include "MediaPlayerService.h"
 #include "ResourceManagerService.h"
 
@@ -35,12 +39,20 @@ int main(int argc __unused, char **argv __unused)
 {
     signal(SIGPIPE, SIG_IGN);
 
+#ifdef NO_CAMERA_SERVER
+    // Set 3 threads for HIDL calls
+    hardware::configureRpcThreadpool(3, /*willjoin*/ false);
+#endif
+
     sp<ProcessState> proc(ProcessState::self());
     sp<IServiceManager> sm(defaultServiceManager());
     ALOGI("ServiceManager: %p", sm.get());
-    InitializeIcuOrDie();
+    AIcu_initializeIcuOrDie();
     MediaPlayerService::instantiate();
     ResourceManagerService::instantiate();
+#ifdef NO_CAMERA_SERVER
+    CameraService::instantiate();
+#endif
     registerExtensions();
     ProcessState::self()->startThreadPool();
     IPCThreadState::self()->joinThreadPool();

@@ -76,4 +76,19 @@ interface ICameraServiceListener
     const int TORCH_STATUS_UNKNOWN = -1;
 
     oneway void onTorchStatusChanged(int status, String cameraId);
+
+    /**
+     * Notify registered clients about camera access priority changes.
+     * Clients which were previously unable to open a certain camera device
+     * can retry after receiving this callback.
+     */
+    oneway void onCameraAccessPrioritiesChanged();
+
+    /**
+     * Notify registered clients about cameras being opened/closed.
+     * Only clients with android.permission.CAMERA_OPEN_CLOSE_LISTENER permission
+     * will receive such callbacks.
+     */
+    oneway void onCameraOpened(String cameraId, String clientPackageId);
+    oneway void onCameraClosed(String cameraId);
 }

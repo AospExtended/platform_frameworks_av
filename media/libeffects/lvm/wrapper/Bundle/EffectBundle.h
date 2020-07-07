@@ -107,6 +107,17 @@ struct BundledEffectContext{
     LVM_FLOAT                       *pInputBuffer;
     LVM_FLOAT                       *pOutputBuffer;
 #endif
+#ifdef SUPPORT_MC
+    LVM_INT32                       ChMask;
+#endif
+
+    /* Bitmask whether drain is in progress due to disabling the effect.
+       The corresponding bit to an effect is set by 1 << lvm_effect_en. */
+    int                             effectInDrain;
+
+    /* Bitmask whether process() was called for a particular effect.
+       The corresponding bit to an effect is set by 1 << lvm_effect_en. */
+    int                             effectProcessCalled;
 };
 
 /* SessionContext : One session */

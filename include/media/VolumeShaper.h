@@ -126,6 +126,7 @@ public:
         Configuration()
             : Interpolator<S, T>()
             , RefBase()
+            , Parcelable()
             , mType(TYPE_SCALE)
             , mId(-1)
             , mOptionFlags(OPTION_FLAG_NONE)
@@ -135,6 +136,7 @@ public:
         explicit Configuration(const Configuration &configuration)
             : Interpolator<S, T>(*static_cast<const Interpolator<S, T> *>(&configuration))
             , RefBase()
+            , Parcelable()
             , mType(configuration.mType)
             , mId(configuration.mId)
             , mOptionFlags(configuration.mOptionFlags)
@@ -551,7 +553,7 @@ public:
 
     static int64_t convertTimespecToUs(const struct timespec &tv)
     {
-        return tv.tv_sec * 1000000ll + tv.tv_nsec / 1000;
+        return tv.tv_sec * 1000000LL + tv.tv_nsec / 1000;
     }
 
     // current monotonic time in microseconds.

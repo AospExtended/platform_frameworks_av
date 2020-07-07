@@ -19,6 +19,7 @@
 //#define LOG_NDEBUG 0
 #define LOG_TAG "CameraSourceTimeLapse"
 
+#include <media/hardware/HardwareAPI.h>
 #include <binder/IPCThreadState.h>
 #include <binder/MemoryBase.h>
 #include <binder/MemoryHeapBase.h>
@@ -172,8 +173,16 @@ void CameraSourceTimeLapse::signalBufferReturned(MediaBufferBase* buffer) {
     ALOGV("signalBufferReturned");
     Mutex::Autolock autoLock(mQuickStopLock);
     if (mQuickStop && (buffer == mLastReadBufferCopy)) {
+        if (metaDataStoredInVideoBuffers() == kMetadataBufferTypeNativeHandleSource) {
+            native_handle_t* handle = (
+                (VideoNativeHandleMetadata*)(mLastReadBufferCopy->data()))->pHandle;
+            native_handle_close(handle);
+            native_handle_delete(handle);
+        }
         buffer->setObserver(NULL);
         buffer->release();
+        mLastReadBufferCopy = NULL;
+        mForceRead = true;
     } else {
         return CameraSource::signalBufferReturned(buffer);
     }
@@ -182,7 +191,8 @@ void CameraSourceTimeLapse::signalBufferReturned(MediaBufferBase* buffer) {
 void createMediaBufferCopy(
         const MediaBufferBase& sourceBuffer,
         int64_t frameTime,
-        MediaBufferBase **newBuffer) {
+        MediaBufferBase **newBuffer,
+        int32_t videoBufferMode) {
 
     ALOGV("createMediaBufferCopy");
     size_t sourceSize = sourceBuffer.size();
@@ -192,13 +202,20 @@ void createMediaBufferCopy(
     memcpy((*newBuffer)->data(), sourcePointer, sourceSize);
 
     (*newBuffer)->meta_data().setInt64(kKeyTime, frameTime);
+
+    if (videoBufferMode == kMetadataBufferTypeNativeHandleSource) {
+        ((VideoNativeHandleMetadata*)((*newBuffer)->data()))->pHandle =
+            native_handle_clone(
+                ((VideoNativeHandleMetadata*)(sourceBuffer.data()))->pHandle);
+    }
 }
 
 void CameraSourceTimeLapse::fillLastReadBufferCopy(MediaBufferBase& sourceBuffer) {
     ALOGV("fillLastReadBufferCopy");
     int64_t frameTime;
     CHECK(sourceBuffer.meta_data().findInt64(kKeyTime, &frameTime));
-    createMediaBufferCopy(sourceBuffer, frameTime, &mLastReadBufferCopy);
+    createMediaBufferCopy(sourceBuffer, frameTime, &mLastReadBufferCopy,
+        metaDataStoredInVideoBuffers());
     mLastReadBufferCopy->add_ref();
     mLastReadBufferCopy->setObserver(this);
 }
@@ -281,7 +298,8 @@ bool CameraSourceTimeLapse::skipFrameAndModifyTimeStamp(int64_t *timestampUs) {
     // The first 2 output frames from the encoder are: decoder specific info and
     // the compressed video frame data for the first input video frame.
     if (mNumFramesEncoded >= 1 && *timestampUs <
-        (mLastTimeLapseFrameRealTimestampUs + mTimeBetweenFrameCaptureUs)) {
+        (mLastTimeLapseFrameRealTimestampUs + mTimeBetweenFrameCaptureUs) &&
+        (mTimeBetweenFrameCaptureUs > mTimeBetweenTimeLapseVideoFramesUs + 1)) {
         // Skip all frames from last encoded frame until
         // sufficient time (mTimeBetweenFrameCaptureUs) has passed.
         // Tell the camera to release its recording frame and return.
@@ -296,6 +314,12 @@ bool CameraSourceTimeLapse::skipFrameAndModifyTimeStamp(int64_t *timestampUs) {
 
         mLastTimeLapseFrameRealTimestampUs = *timestampUs;
         *timestampUs = mLastFrameTimestampUs + mTimeBetweenTimeLapseVideoFramesUs;
+        // Update start-time once the captured-time reaches the expected start-time.
+        // Not doing so will result in CameraSource always dropping frames since
+        // updated-timestamp will never intersect start-timestamp
+        if ((mNumFramesReceived == 0 && mLastTimeLapseFrameRealTimestampUs >= mStartTimeUs)) {
+            mStartTimeUs = *timestampUs;
+        }
         return false;
     }
     return false;

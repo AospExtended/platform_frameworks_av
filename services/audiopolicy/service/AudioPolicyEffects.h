@@ -28,6 +28,8 @@
 
 namespace android {
 
+class AudioPolicyService;
+
 // ----------------------------------------------------------------------------
 
 // AudioPolicyEffects class
@@ -41,7 +43,7 @@ public:
     // The constructor will parse audio_effects.conf
     // First it will look whether vendor specific file exists,
     // otherwise it will parse the system default file.
-	         AudioPolicyEffects();
+            AudioPolicyEffects(AudioPolicyService *audioPolicyService);
     virtual ~AudioPolicyEffects();
 
     // NOTE: methods on AudioPolicyEffects should never be called with the AudioPolicyService
@@ -64,7 +66,6 @@ public:
     status_t releaseInputEffects(audio_io_handle_t input,
                                  audio_session_t audioSession);
 
-
     // Return a list of effect descriptors for default output effects
     // associated with audioSession
     status_t queryDefaultOutputSessionEffects(audio_session_t audioSession,
@@ -82,18 +83,73 @@ public:
                              audio_stream_type_t stream,
                              audio_session_t audioSession);
 
+    // Add the effect to the list of default effects for sources of type |source|.
+    status_t addSourceDefaultEffect(const effect_uuid_t *type,
+                                    const String16& opPackageName,
+                                    const effect_uuid_t *uuid,
+                                    int32_t priority,
+                                    audio_source_t source,
+                                    audio_unique_id_t* id);
+
+    // Add the effect to the list of default effects for streams of a given usage.
+    status_t addStreamDefaultEffect(const effect_uuid_t *type,
+                                    const String16& opPackageName,
+                                    const effect_uuid_t *uuid,
+                                    int32_t priority,
+                                    audio_usage_t usage,
+                                    audio_unique_id_t* id);
+
+    // Remove the default source effect from wherever it's attached.
+    status_t removeSourceDefaultEffect(audio_unique_id_t id);
+
+    // Remove the default stream effect from wherever it's attached.
+    status_t removeStreamDefaultEffect(audio_unique_id_t id);
+
+    status_t updateOutputAudioSessionInfo(audio_io_handle_t output,
+                             audio_stream_type_t stream,
+                             audio_session_t audioSession,
+                             audio_output_flags_t flags,
+                             const audio_config_t *config, uid_t uid);
+
+    status_t releaseOutputAudioSessionInfo(audio_io_handle_t output,
+                             audio_stream_type_t stream,
+                             audio_session_t audioSession);
+
+    status_t listAudioSessions(audio_stream_type_t streams,
+                             Vector< sp<AudioSessionInfo>> &sessions);
+
 private:
 
     // class to store the description of an effects and its parameters
     // as defined in audio_effects.conf
     class EffectDesc {
     public:
-        EffectDesc(const char *name, const effect_uuid_t& uuid) :
+        EffectDesc(const char *name,
+                   const effect_uuid_t& typeUuid,
+                   const String16& opPackageName,
+                   const effect_uuid_t& uuid,
+                   uint32_t priority,
+                   audio_unique_id_t id) :
                         mName(strdup(name)),
-                        mUuid(uuid) { }
+                        mTypeUuid(typeUuid),
+                        mOpPackageName(opPackageName),
+                        mUuid(uuid),
+                        mPriority(priority),
+                        mId(id) { }
+        EffectDesc(const char *name, const effect_uuid_t& uuid) :
+                        EffectDesc(name,
+                                   *EFFECT_UUID_NULL,
+                                   String16(""),
+                                   uuid,
+                                   0,
+                                   AUDIO_UNIQUE_ID_ALLOCATE) { }
         EffectDesc(const EffectDesc& orig) :
                         mName(strdup(orig.mName)),
-                        mUuid(orig.mUuid) {
+                        mTypeUuid(orig.mTypeUuid),
+                        mOpPackageName(orig.mOpPackageName),
+                        mUuid(orig.mUuid),
+                        mPriority(orig.mPriority),
+                        mId(orig.mId) {
                             // deep copy mParams
                             for (size_t k = 0; k < orig.mParams.size(); k++) {
                                 effect_param_t *origParam = orig.mParams[k];
@@ -116,7 +172,11 @@ private:
             }
         }
         char *mName;
+        effect_uuid_t mTypeUuid;
+        String16 mOpPackageName;
         effect_uuid_t mUuid;
+        int32_t mPriority;
+        audio_unique_id_t mId;
         Vector <effect_param_t *> mParams;
     };
 
@@ -180,6 +240,8 @@ private:
                          size_t *totSize);
 
     // protects access to mInputSources, mInputSessions, mOutputStreams, mOutputSessions
+    // never hold AudioPolicyService::mLock when calling AudioPolicyEffects methods as
+    // those can call back into AudioPolicyService methods and try to acquire the mutex
     Mutex mLock;
     // Automatic input effects are configured per audio_source_t
     KeyedVector< audio_source_t, EffectDescVector* > mInputSources;
@@ -190,6 +252,10 @@ private:
     KeyedVector< audio_stream_type_t, EffectDescVector* > mOutputStreams;
     // Automatic output effects are unique for audiosession ID
     KeyedVector< audio_session_t, EffectVector* > mOutputSessions;
+    // Stream info for session events
+    KeyedVector< audio_session_t, sp<AudioSessionInfo> > mOutputAudioSessionInfo;
+
+    AudioPolicyService *mAudioPolicyService;
 };
 
 } // namespace android

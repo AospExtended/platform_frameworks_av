@@ -68,8 +68,7 @@ public:
             int cameraFacing,
             int clientPid,
             int clientUid,
-            int servicePid,
-            bool legacyMode = false);
+            int servicePid);
     ~CameraClient();
 
     virtual status_t initialize(sp<CameraProviderManager> manager,
@@ -179,6 +178,9 @@ private:
     // This function keeps trying to grab mLock, or give up if the message
     // is found to be disabled. It returns true if mLock is grabbed.
     bool                    lockIfMessageWanted(int32_t msgType);
+
+    bool                 mLongshotEnabled;
+    int                  mBurstCnt;
 };
 
 }

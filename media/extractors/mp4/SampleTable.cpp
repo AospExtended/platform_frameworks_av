@@ -25,7 +25,7 @@
 
 #include <arpa/inet.h>
 
-#include <media/DataSourceBase.h>
+#include <media/MediaExtractorPluginApi.h>
 #include <media/stagefright/foundation/ADebug.h>
 #include <media/stagefright/foundation/ByteUtils.h>
 
@@ -37,13 +37,13 @@
 namespace android {
 
 // static
-const uint32_t SampleTable::kChunkOffsetType32 = FOURCC('s', 't', 'c', 'o');
+const uint32_t SampleTable::kChunkOffsetType32 = FOURCC("stco");
 // static
-const uint32_t SampleTable::kChunkOffsetType64 = FOURCC('c', 'o', '6', '4');
+const uint32_t SampleTable::kChunkOffsetType64 = FOURCC("co64");
 // static
-const uint32_t SampleTable::kSampleSizeType32 = FOURCC('s', 't', 's', 'z');
+const uint32_t SampleTable::kSampleSizeType32 = FOURCC("stsz");
 // static
-const uint32_t SampleTable::kSampleSizeTypeCompact = FOURCC('s', 't', 'z', '2');
+const uint32_t SampleTable::kSampleSizeTypeCompact = FOURCC("stz2");
 
 ////////////////////////////////////////////////////////////////////////////////
 
@@ -114,7 +114,7 @@ int32_t SampleTable::CompositionDeltaLookup::getCompositionTimeOffset(
 
 ////////////////////////////////////////////////////////////////////////////////
 
-SampleTable::SampleTable(DataSourceBase *source)
+SampleTable::SampleTable(DataSourceHelper *source)
     : mDataSource(source),
       mChunkOffsetOffset(-1),
       mChunkOffsetType(0),
@@ -391,19 +391,10 @@ status_t SampleTable::setTimeToSampleParams(
     }
 
     mTimeToSampleCount = U32_AT(&header[4]);
-    if (mTimeToSampleCount > UINT32_MAX / (2 * sizeof(uint32_t))) {
-        // Choose this bound because
-        // 1) 2 * sizeof(uint32_t) is the amount of memory needed for one
-        //    time-to-sample entry in the time-to-sample table.
-        // 2) mTimeToSampleCount is the number of entries of the time-to-sample
-        //    table.
-        // 3) We hope that the table size does not exceed UINT32_MAX.
+    if (mTimeToSampleCount > (data_size - 8) / (2 * sizeof(uint32_t))) {
         ALOGE("Time-to-sample table size too large.");
         return ERROR_OUT_OF_RANGE;
     }
-
-    // Note: At this point, we know that mTimeToSampleCount * 2 will not
-    // overflow because of the above condition.
 
     uint64_t allocSize = (uint64_t)mTimeToSampleCount * 2 * sizeof(uint32_t);
     mTotalSize += allocSize;
@@ -540,6 +531,12 @@ status_t SampleTable::setSyncSampleParams(off64_t data_offset, size_t data_size)
     }
 
     uint64_t allocSize = (uint64_t)numSyncSamples * sizeof(uint32_t);
+    if (allocSize > data_size - 8) {
+        ALOGW("b/124771364 - allocSize(%lu) > size(%lu)",
+                (unsigned long)allocSize, (unsigned long)(data_size - 8));
+        android_errorWriteLog(0x534e4554, "124771364");
+        return ERROR_MALFORMED;
+    }
     if (allocSize > kMaxTotalSize) {
         ALOGE("Sync sample table size too large.");
         return ERROR_OUT_OF_RANGE;
@@ -614,7 +611,7 @@ status_t SampleTable::getMaxSampleSize(size_t *max_size) {
     return OK;
 }
 
-uint32_t abs_difference(uint32_t time1, uint32_t time2) {
+uint32_t abs_difference(uint64_t time1, uint64_t time2) {
     return time1 > time2 ? time1 - time2 : time2 - time1;
 }
 
@@ -662,7 +659,7 @@ void SampleTable::buildSampleEntriesTable() {
     }
 
     uint32_t sampleIndex = 0;
-    uint32_t sampleTime = 0;
+    uint64_t sampleTime = 0;
 
     for (uint32_t i = 0; i < mTimeToSampleCount; ++i) {
         uint32_t n = mTimeToSample[2 * i];
@@ -684,13 +681,13 @@ void SampleTable::buildSampleEntriesTable() {
                         (compTimeDelta == INT32_MIN ?
                                 INT32_MAX : uint32_t(-compTimeDelta)))
                         || (compTimeDelta > 0 &&
-                                sampleTime > UINT32_MAX - compTimeDelta)) {
-                    ALOGE("%u + %d would overflow, clamping",
-                            sampleTime, compTimeDelta);
+                                sampleTime > UINT64_MAX - compTimeDelta)) {
+                    ALOGE("%llu + %d would overflow, clamping",
+                            (unsigned long long) sampleTime, compTimeDelta);
                     if (compTimeDelta < 0) {
                         sampleTime = 0;
                     } else {
-                        sampleTime = UINT32_MAX;
+                        sampleTime = UINT64_MAX;
                     }
                     compTimeDelta = 0;
                 }
@@ -701,10 +698,10 @@ void SampleTable::buildSampleEntriesTable() {
             }
 
             ++sampleIndex;
-            if (sampleTime > UINT32_MAX - delta) {
-                ALOGE("%u + %u would overflow, clamping",
-                    sampleTime, delta);
-                sampleTime = UINT32_MAX;
+            if (sampleTime > UINT64_MAX - delta) {
+                ALOGE("%llu + %u would overflow, clamping",
+                    (unsigned long long) sampleTime, delta);
+                sampleTime = UINT64_MAX;
             } else {
                 sampleTime += delta;
             }
@@ -870,19 +867,19 @@ status_t SampleTable::findSyncSampleNear(
             if (err != OK) {
                 return err;
             }
-            uint32_t sample_time = mSampleIterator->getSampleTime();
+            uint64_t sample_time = mSampleIterator->getSampleTime();
 
             err = mSampleIterator->seekTo(mSyncSamples[left]);
             if (err != OK) {
                 return err;
             }
-            uint32_t upper_time = mSampleIterator->getSampleTime();
+            uint64_t upper_time = mSampleIterator->getSampleTime();
 
             err = mSampleIterator->seekTo(mSyncSamples[left - 1]);
             if (err != OK) {
                 return err;
             }
-            uint32_t lower_time = mSampleIterator->getSampleTime();
+            uint64_t lower_time = mSampleIterator->getSampleTime();
 
             // use abs_difference for safety
             if (abs_difference(upper_time, sample_time) >
@@ -946,13 +943,18 @@ status_t SampleTable::getSampleSize_l(
             sampleIndex, sampleSize);
 }
 
+uint32_t SampleTable::getLastSampleIndexInChunk() {
+    Mutex::Autolock autoLock(mLock);
+    return mSampleIterator->getLastSampleIndexInChunk();
+}
+
 status_t SampleTable::getMetaDataForSample(
         uint32_t sampleIndex,
         off64_t *offset,
         size_t *size,
-        uint32_t *compositionTime,
+        uint64_t *compositionTime,
         bool *isSyncSample,
-        uint32_t *sampleDuration) {
+        uint64_t *sampleDuration) {
     Mutex::Autolock autoLock(mLock);
 
     status_t err;

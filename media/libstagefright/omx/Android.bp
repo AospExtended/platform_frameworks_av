@@ -6,22 +6,91 @@ cc_library_shared {
     },
 
     srcs: [
-        "BWGraphicBufferSource.cpp",
         "OMXMaster.cpp",
         "OMXNodeInstance.cpp",
         "OMXUtils.cpp",
         "OmxGraphicBufferSource.cpp",
-        "SimpleSoftOMXComponent.cpp",
-        "SoftOMXComponent.cpp",
-        "SoftOMXPlugin.cpp",
-        "SoftVideoDecoderOMXComponent.cpp",
-        "SoftVideoEncoderOMXComponent.cpp",
         "1.0/Omx.cpp",
         "1.0/OmxStore.cpp",
         "1.0/WGraphicBufferSource.cpp",
         "1.0/WOmxNode.cpp",
         "1.0/WOmxObserver.cpp",
         "1.0/WOmxBufferSource.cpp",
+    ],
+
+    export_include_dirs: [
+        "include",
+    ],
+
+    header_libs: [
+        "libbase_headers",
+        "media_plugin_headers",
+    ],
+
+    export_header_lib_headers: [
+        "media_plugin_headers",
+    ],
+
+    shared_libs: [
+        "libbase",
+        "libbinder",
+        "libmedia_omx",
+        "libutils",
+        "liblog",
+        "libui",
+        "libcutils",
+        "libstagefright_foundation",
+        "libstagefright_bufferqueue_helper",
+        "libstagefright_xmlparser",
+        "libdl",
+        "libhidlbase",
+        "libhidlmemory",
+        "libhidltransport",
+        "libvndksupport",
+        "android.hardware.media.omx@1.0",
+        "android.hardware.graphics.bufferqueue@1.0",
+    ],
+
+    export_shared_lib_headers: [
+        "libstagefright_foundation",
+        "libstagefright_xmlparser",
+        "libutils",
+    ],
+
+    cflags: [
+        "-Werror",
+        "-Wall",
+        "-Wno-unused-parameter",
+        "-Wno-documentation",
+    ],
+
+    product_variables: {
+        aosp: {
+            uses_qcom_bsp_legacy: {
+                cppflags: ["-DQCOM_BSP_LEGACY"],
+            },
+        },
+    },
+
+    sanitize: {
+        misc_undefined: [
+            "signed-integer-overflow",
+            "unsigned-integer-overflow",
+        ],
+        cfi: true,
+    },
+
+}
+
+cc_library_shared {
+    name: "libstagefright_softomx",
+    vendor_available: true,
+
+    srcs: [
+        "SimpleSoftOMXComponent.cpp",
+        "SoftOMXComponent.cpp",
+        "SoftVideoDecoderOMXComponent.cpp",
+        "SoftVideoEncoderOMXComponent.cpp",
     ],
 
     export_include_dirs: [
@@ -37,31 +106,9 @@ cc_library_shared {
     ],
 
     shared_libs: [
-        "libbase",
-        "libbinder",
-        "libmedia_omx",
-        "libutils",
+        "libstagefright_foundation",
         "liblog",
         "libui",
-        "libgui",
-        "libcutils",
-        "libstagefright_foundation",
-        "libstagefright_bufferqueue_helper",
-        "libstagefright_xmlparser",
-        "libdl",
-        "libhidlbase",
-        "libhidlmemory",
-        "libhidltransport",
-        "libnativewindow", // TODO(b/62923479): use header library
-        "libvndksupport",
-        "android.hardware.media.omx@1.0",
-        "android.hardware.graphics.bufferqueue@1.0",
-    ],
-
-    export_shared_lib_headers: [
-        "libmedia_omx",
-        "libstagefright_foundation",
-        "libstagefright_xmlparser",
         "libutils",
     ],
 
@@ -78,10 +125,80 @@ cc_library_shared {
             "unsigned-integer-overflow",
         ],
         cfi: true,
-        diag: {
-            cfi: true,
-        },
     },
+}
+
+cc_library_shared {
+    name: "libstagefright_softomx_plugin",
+    vendor_available: true,
+
+    srcs: [
+        "SoftOMXPlugin.cpp",
+    ],
+
+    export_include_dirs: [
+        "include",
+    ],
+
+    header_libs: [
+        "media_plugin_headers",
+    ],
+
+    export_header_lib_headers: [
+        "media_plugin_headers",
+    ],
+
+    shared_libs: [
+        "libstagefright_softomx",
+        "libstagefright_foundation",
+        "liblog",
+        "libutils",
+    ],
+
+    cflags: [
+        "-Werror",
+        "-Wall",
+        "-Wno-unused-parameter",
+        "-Wno-documentation",
+    ],
+
+    sanitize: {
+        misc_undefined: [
+            "signed-integer-overflow",
+            "unsigned-integer-overflow",
+        ],
+        cfi: true,
+    },
+}
+
+cc_defaults {
+    name: "libstagefright_softomx-defaults",
+    vendor_available: true,
+
+    cflags: [
+        "-Werror",
+    ],
+
+    header_libs: [
+        "media_plugin_headers"
+    ],
+
+    shared_libs: [
+        "libstagefright_softomx",
+        "libstagefright_foundation",
+        "libutils",
+        "liblog",
+    ],
+
+    sanitize: {
+        misc_undefined: [
+            "signed-integer-overflow",
+            "unsigned-integer-overflow",
+        ],
+        cfi: true,
+    },
+
+    compile_multilib: "32",
 }
 
 cc_library_shared {
@@ -90,6 +207,7 @@ cc_library_shared {
     vndk: {
         enabled: true,
     },
+    double_loadable: true,
     srcs: ["OMXUtils.cpp"],
     export_include_dirs: [
         "include",
@@ -114,13 +232,7 @@ cc_library_shared {
             "unsigned-integer-overflow",
         ],
         cfi: true,
-        diag: {
-            cfi: true,
-        },
     },
     cflags: ["-Wall", "-Werror"],
 }
 
-//###############################################################################
-
-subdirs = ["tests"]

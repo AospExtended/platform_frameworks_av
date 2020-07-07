@@ -24,8 +24,5 @@ cc_test {
 
     sanitize: {
         cfi: true,
-        diag: {
-            cfi: true,
-        },
     },
 }

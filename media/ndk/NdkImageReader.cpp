@@ -21,13 +21,15 @@
 
 #include "NdkImagePriv.h"
 #include "NdkImageReaderPriv.h"
+#include <private/media/NdkImage.h>
 
 #include <cutils/atomic.h>
 #include <utils/Log.h>
 #include <android_media_Utils.h>
-#include <android_runtime/android_view_Surface.h>
-#include <android_runtime/android_hardware_HardwareBuffer.h>
+#include <ui/PublicFormat.h>
+#include <private/android/AHardwareBufferHelpers.h>
 #include <grallocusage/GrallocUsageConversion.h>
+#include <gui/bufferqueue/1.0/WGraphicBufferProducer.h>
 
 using namespace android;
 
@@ -42,6 +44,10 @@ namespace {
 const char* AImageReader::kCallbackFpKey = "Callback";
 const char* AImageReader::kContextKey    = "Context";
 const char* AImageReader::kGraphicBufferKey = "GraphicBuffer";
+
+static constexpr int kWindowHalTokenSizeMax = 256;
+
+static native_handle_t *convertHalTokenToNativeHandle(const HalToken &halToken);
 
 bool
 AImageReader::isSupportedFormatAndUsage(int32_t format, uint64_t usage) {
@@ -58,11 +64,15 @@ AImageReader::isSupportedFormatAndUsage(int32_t format, uint64_t usage) {
         case AIMAGE_FORMAT_YUV_420_888:
         case AIMAGE_FORMAT_JPEG:
         case AIMAGE_FORMAT_RAW16:
+        case AIMAGE_FORMAT_RAW_DEPTH:
         case AIMAGE_FORMAT_RAW_PRIVATE:
         case AIMAGE_FORMAT_RAW10:
         case AIMAGE_FORMAT_RAW12:
         case AIMAGE_FORMAT_DEPTH16:
         case AIMAGE_FORMAT_DEPTH_POINT_CLOUD:
+        case AIMAGE_FORMAT_Y8:
+        case AIMAGE_FORMAT_HEIC:
+        case AIMAGE_FORMAT_DEPTH_JPEG:
             return true;
         case AIMAGE_FORMAT_PRIVATE:
             // For private format, cpu usage is prohibited.
@@ -84,11 +94,15 @@ AImageReader::getNumPlanesForFormat(int32_t format) {
         case AIMAGE_FORMAT_RGBA_FP16:
         case AIMAGE_FORMAT_JPEG:
         case AIMAGE_FORMAT_RAW16:
+        case AIMAGE_FORMAT_RAW_DEPTH:
         case AIMAGE_FORMAT_RAW_PRIVATE:
         case AIMAGE_FORMAT_RAW10:
         case AIMAGE_FORMAT_RAW12:
         case AIMAGE_FORMAT_DEPTH16:
         case AIMAGE_FORMAT_DEPTH_POINT_CLOUD:
+        case AIMAGE_FORMAT_Y8:
+        case AIMAGE_FORMAT_HEIC:
+        case AIMAGE_FORMAT_DEPTH_JPEG:
             return 1;
         case AIMAGE_FORMAT_PRIVATE:
             return 0;
@@ -99,12 +113,12 @@ AImageReader::getNumPlanesForFormat(int32_t format) {
 
 void
 AImageReader::FrameListener::onFrameAvailable(const BufferItem& /*item*/) {
-    Mutex::Autolock _l(mLock);
     sp<AImageReader> reader = mReader.promote();
     if (reader == nullptr) {
         ALOGW("A frame is available after AImageReader closed!");
         return; // reader has been closed
     }
+    Mutex::Autolock _l(mLock);
     if (mListener.onImageAvailable == nullptr) {
         return; // No callback registered
     }
@@ -129,12 +143,12 @@ AImageReader::FrameListener::setImageListener(AImageReader_ImageListener* listen
 
 void
 AImageReader::BufferRemovedListener::onBufferFreed(const wp<GraphicBuffer>& graphicBuffer) {
-    Mutex::Autolock _l(mLock);
     sp<AImageReader> reader = mReader.promote();
     if (reader == nullptr) {
         ALOGW("A frame is available after AImageReader closed!");
         return; // reader has been closed
     }
+    Mutex::Autolock _l(mLock);
     if (mListener.onBufferRemoved == nullptr) {
         return; // No callback registered
     }
@@ -258,12 +272,17 @@ AImageReader::AImageReader(int32_t width,
       mFrameListener(new FrameListener(this)),
       mBufferRemovedListener(new BufferRemovedListener(this)) {}
 
+AImageReader::~AImageReader() {
+    Mutex::Autolock _l(mLock);
+    LOG_FATAL_IF("AImageReader not closed before destruction", mIsClosed != true);
+}
+
 media_status_t
 AImageReader::init() {
     PublicFormat publicFormat = static_cast<PublicFormat>(mFormat);
-    mHalFormat = android_view_Surface_mapPublicFormatToHalFormat(publicFormat);
-    mHalDataSpace = android_view_Surface_mapPublicFormatToHalDataspace(publicFormat);
-    mHalUsage = android_hardware_HardwareBuffer_convertToGrallocUsageBits(mUsage);
+    mHalFormat = mapPublicFormatToHalFormat(publicFormat);
+    mHalDataSpace = mapPublicFormatToHalDataspace(publicFormat);
+    mHalUsage = AHardwareBuffer_convertToGrallocUsageBits(mUsage);
 
     sp<IGraphicBufferProducer> gbProducer;
     sp<IGraphicBufferConsumer> gbConsumer;
@@ -301,6 +320,9 @@ AImageReader::init() {
         ALOGE("Failed to set BufferItemConsumer buffer dataSpace");
         return AMEDIA_ERROR_UNKNOWN;
     }
+    if (mUsage & AHARDWAREBUFFER_USAGE_PROTECTED_CONTENT) {
+        gbConsumer->setConsumerIsProtected(true);
+    }
 
     mSurface = new Surface(mProducer, /*controlledByApp*/true);
     if (mSurface == nullptr) {
@@ -330,8 +352,12 @@ AImageReader::init() {
     return AMEDIA_OK;
 }
 
-AImageReader::~AImageReader() {
+void AImageReader::close() {
     Mutex::Autolock _l(mLock);
+    if (mIsClosed) {
+        return;
+    }
+    mIsClosed = true;
     AImageReader_ImageListener nullListener = {nullptr, nullptr};
     setImageListenerLocked(&nullListener);
 
@@ -350,8 +376,10 @@ AImageReader::~AImageReader() {
               it != mAcquiredImages.end(); it++) {
         AImage* image = *it;
         Mutex::Autolock _l(image->mLock);
-        releaseImageLocked(image, /*releaseFenceFd*/-1);
+        // Do not alter mAcquiredImages while we are iterating on it
+        releaseImageLocked(image, /*releaseFenceFd*/-1, /*clearCache*/false);
     }
+    mAcquiredImages.clear();
 
     // Delete Buffer Items
     for (auto it = mBuffers.begin();
@@ -362,6 +390,15 @@ AImageReader::~AImageReader() {
     if (mBufferItemConsumer != nullptr) {
         mBufferItemConsumer->abandon();
         mBufferItemConsumer->setFrameAvailableListener(nullptr);
+    }
+
+    if (mWindowHandle != nullptr) {
+        int size = mWindowHandle->data[0];
+        hidl_vec<uint8_t> halToken;
+        halToken.setToExternal(
+            reinterpret_cast<uint8_t *>(&mWindowHandle->data[1]), size);
+        deleteHalToken(halToken);
+        native_handle_delete(mWindowHandle);
     }
 }
 
@@ -481,7 +518,7 @@ AImageReader::returnBufferItemLocked(BufferItem* buffer) {
 }
 
 void
-AImageReader::releaseImageLocked(AImage* image, int releaseFenceFd) {
+AImageReader::releaseImageLocked(AImage* image, int releaseFenceFd, bool clearCache) {
     BufferItem* buffer = image->mBuffer;
     if (buffer == nullptr) {
         // This should not happen, but is not fatal
@@ -505,6 +542,10 @@ AImageReader::releaseImageLocked(AImage* image, int releaseFenceFd) {
     image->mLockedBuffer = nullptr;
     image->mIsClosed = true;
 
+    if (!clearCache) {
+        return;
+    }
+
     bool found = false;
     // cleanup acquired image list
     for (auto it = mAcquiredImages.begin();
@@ -520,6 +561,25 @@ AImageReader::releaseImageLocked(AImage* image, int releaseFenceFd) {
         ALOGE("Error: AImage %p is not generated by AImageReader %p",
                 image, this);
     }
+}
+
+media_status_t AImageReader::getWindowNativeHandle(native_handle **handle) {
+    if (mWindowHandle != nullptr) {
+        *handle = mWindowHandle;
+        return AMEDIA_OK;
+    }
+    sp<HGraphicBufferProducer> hgbp =
+        new TWGraphicBufferProducer<HGraphicBufferProducer>(mProducer);
+    HalToken halToken;
+    if (!createHalToken(hgbp, &halToken)) {
+        return AMEDIA_ERROR_UNKNOWN;
+    }
+    mWindowHandle = convertHalTokenToNativeHandle(halToken);
+    if (!mWindowHandle) {
+        return AMEDIA_ERROR_UNKNOWN;
+    }
+    *handle = mWindowHandle;
+    return AMEDIA_OK;
 }
 
 int
@@ -585,6 +645,33 @@ AImageReader::acquireLatestImage(/*out*/AImage** image, /*out*/int* acquireFence
     }
 }
 
+static native_handle_t *convertHalTokenToNativeHandle(
+        const HalToken &halToken) {
+    // We attempt to store halToken in the ints of the native_handle_t after its
+    // size. The first int stores the size of the token. We store this in an int
+    // to avoid alignment issues where size_t and int do not have the same
+    // alignment.
+    size_t nhDataByteSize = halToken.size();
+    if (nhDataByteSize > kWindowHalTokenSizeMax) {
+        // The size of the token isn't reasonable..
+        return nullptr;
+    }
+    size_t numInts = ceil(nhDataByteSize / sizeof(int)) + 1;
+
+    // We don't check for overflow, whether numInts can fit in an int, since we
+    // expect kWindowHalTokenSizeMax to be a reasonable limit.
+    // create a native_handle_t with 0 numFds and numInts number of ints.
+    native_handle_t *nh =
+        native_handle_create(0, numInts);
+    if (!nh) {
+        return nullptr;
+    }
+    // Store the size of the token in the first int.
+    nh->data[0] = nhDataByteSize;
+    memcpy(&(nh->data[1]), halToken.data(), nhDataByteSize);
+    return nh;
+}
+
 EXPORT
 media_status_t AImageReader_new(
         int32_t width, int32_t height, int32_t format, int32_t maxImages,
@@ -593,6 +680,19 @@ media_status_t AImageReader_new(
     return AImageReader_newWithUsage(
             width, height, format, AHARDWAREBUFFER_USAGE_CPU_READ_OFTEN, maxImages, reader);
 }
+
+extern "C" {
+
+EXPORT
+media_status_t AImageReader_getWindowNativeHandle(
+        AImageReader *reader, /*out*/native_handle_t **handle) {
+    if (reader == nullptr || handle == nullptr) {
+        return AMEDIA_ERROR_INVALID_PARAMETER;
+    }
+    return reader->getWindowNativeHandle(handle);
+}
+
+} //extern "C"
 
 EXPORT
 media_status_t AImageReader_newWithUsage(
@@ -650,6 +750,7 @@ EXPORT
 void AImageReader_delete(AImageReader* reader) {
     ALOGV("%s", __FUNCTION__);
     if (reader != nullptr) {
+        reader->close();
         reader->decStrong((void*) AImageReader_delete);
     }
     return;

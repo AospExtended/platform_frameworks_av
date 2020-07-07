@@ -69,11 +69,14 @@ struct AImageReader : public RefBase {
     media_status_t acquireNextImage(/*out*/AImage** image, /*out*/int* fenceFd);
     media_status_t acquireLatestImage(/*out*/AImage** image, /*out*/int* fenceFd);
 
+    media_status_t getWindowNativeHandle(/*out*/native_handle_t **handle);
+
     ANativeWindow* getWindow()    const { return mWindow.get(); };
     int32_t        getWidth()     const { return mWidth; };
     int32_t        getHeight()    const { return mHeight; };
     int32_t        getFormat()    const { return mFormat; };
     int32_t        getMaxImages() const { return mMaxImages; };
+    void           close();
 
   private:
 
@@ -86,7 +89,7 @@ struct AImageReader : public RefBase {
     media_status_t acquireImageLocked(/*out*/AImage** image, /*out*/int* fenceFd);
 
     // Called by AImage/~AImageReader to close image. Caller is responsible to grab AImage::mLock
-    void releaseImageLocked(AImage* image, int releaseFenceFd);
+    void releaseImageLocked(AImage* image, int releaseFenceFd, bool clearCache = true);
 
     static int getBufferWidth(BufferItem* buffer);
     static int getBufferHeight(BufferItem* buffer);
@@ -132,7 +135,7 @@ struct AImageReader : public RefBase {
 
       private:
         AImageReader_ImageListener mListener = {nullptr, nullptr};
-        wp<AImageReader>           mReader;
+        const wp<AImageReader>     mReader;
         Mutex                      mLock;
     };
     sp<FrameListener> mFrameListener;
@@ -147,7 +150,7 @@ struct AImageReader : public RefBase {
 
        private:
         AImageReader_BufferRemovedListener mListener = {nullptr, nullptr};
-        wp<AImageReader>           mReader;
+        const wp<AImageReader>     mReader;
         Mutex                      mLock;
     };
     sp<BufferRemovedListener> mBufferRemovedListener;
@@ -160,8 +163,10 @@ struct AImageReader : public RefBase {
     sp<Surface>                mSurface;
     sp<BufferItemConsumer>     mBufferItemConsumer;
     sp<ANativeWindow>          mWindow;
+    native_handle_t*           mWindowHandle = nullptr;
 
     List<AImage*>              mAcquiredImages;
+    bool                       mIsClosed = false;
 
     Mutex                      mLock;
 };

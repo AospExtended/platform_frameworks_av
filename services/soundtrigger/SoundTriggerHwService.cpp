@@ -22,26 +22,49 @@
 #include <sys/types.h>
 #include <pthread.h>
 
+#include <audio_utils/clock.h>
 #include <system/sound_trigger.h>
 #include <cutils/atomic.h>
 #include <cutils/properties.h>
 #include <hardware/hardware.h>
 #include <media/AudioSystem.h>
+#include <mediautils/ServiceUtilities.h>
 #include <utils/Errors.h>
 #include <utils/Log.h>
 #include <binder/IServiceManager.h>
 #include <binder/MemoryBase.h>
 #include <binder/MemoryHeapBase.h>
 #include <system/sound_trigger.h>
-#include <ServiceUtilities.h>
 #include "SoundTriggerHwService.h"
 
-#ifdef SOUND_TRIGGER_USE_STUB_MODULE
-#define HW_MODULE_PREFIX "stub"
-#else
 #define HW_MODULE_PREFIX "primary"
-#endif
 namespace android {
+
+namespace {
+
+// Given an IMemory, returns a copy of its content along with its size.
+// Returns nullptr on failure or if input is nullptr.
+std::pair<std::unique_ptr<uint8_t[]>,
+          size_t> CopyToArray(const sp<IMemory>& mem) {
+    if (mem == nullptr) {
+        return std::make_pair(nullptr, 0);
+    }
+
+    const size_t size = mem->size();
+    if (size == 0) {
+        return std::make_pair(nullptr, 0);
+    }
+
+    std::unique_ptr<uint8_t[]> ar = std::make_unique<uint8_t[]>(size);
+    if (ar == nullptr) {
+        return std::make_pair(nullptr, 0);
+    }
+
+    memcpy(ar.get(), mem->pointer(), size);
+    return std::make_pair(std::move(ar), size);
+}
+
+}
 
 SoundTriggerHwService::SoundTriggerHwService()
     : BnSoundTriggerHwService(),
@@ -85,11 +108,13 @@ SoundTriggerHwService::~SoundTriggerHwService()
     }
 }
 
-status_t SoundTriggerHwService::listModules(struct sound_trigger_module_descriptor *modules,
+status_t SoundTriggerHwService::listModules(const String16& opPackageName,
+                             struct sound_trigger_module_descriptor *modules,
                              uint32_t *numModules)
 {
     ALOGV("listModules");
-    if (!captureHotwordAllowed(IPCThreadState::self()->getCallingPid(),
+    if (!captureHotwordAllowed(opPackageName,
+                               IPCThreadState::self()->getCallingPid(),
                                IPCThreadState::self()->getCallingUid())) {
         return PERMISSION_DENIED;
     }
@@ -106,12 +131,14 @@ status_t SoundTriggerHwService::listModules(struct sound_trigger_module_descript
     return NO_ERROR;
 }
 
-status_t SoundTriggerHwService::attach(const sound_trigger_module_handle_t handle,
+status_t SoundTriggerHwService::attach(const String16& opPackageName,
+                        const sound_trigger_module_handle_t handle,
                         const sp<ISoundTriggerClient>& client,
                         sp<ISoundTrigger>& moduleInterface)
 {
     ALOGV("attach module %d", handle);
-    if (!captureHotwordAllowed(IPCThreadState::self()->getCallingPid(),
+    if (!captureHotwordAllowed(opPackageName,
+                               IPCThreadState::self()->getCallingPid(),
                                IPCThreadState::self()->getCallingUid())) {
         return PERMISSION_DENIED;
     }
@@ -127,7 +154,7 @@ status_t SoundTriggerHwService::attach(const sound_trigger_module_handle_t handl
     }
     sp<Module> module = mModules.valueAt(index);
 
-    sp<ModuleClient> moduleClient = module->addClient(client);
+    sp<ModuleClient> moduleClient = module->addClient(client, opPackageName);
     if (moduleClient == 0) {
         return NO_INIT;
     }
@@ -150,20 +177,12 @@ status_t SoundTriggerHwService::setCaptureState(bool active)
 }
 
 
-static const int kDumpLockRetries = 50;
-static const int kDumpLockSleep = 60000;
+static const int kDumpLockTimeoutNs = 1 * NANOS_PER_SECOND;
 
-static bool tryLock(Mutex& mutex)
+static bool dumpTryLock(Mutex& mutex)
 {
-    bool locked = false;
-    for (int i = 0; i < kDumpLockRetries; ++i) {
-        if (mutex.tryLock() == NO_ERROR) {
-            locked = true;
-            break;
-        }
-        usleep(kDumpLockSleep);
-    }
-    return locked;
+    status_t err = mutex.timedLock(kDumpLockTimeoutNs);
+    return err == NO_ERROR;
 }
 
 status_t SoundTriggerHwService::dump(int fd, const Vector<String16>& args __unused) {
@@ -172,7 +191,7 @@ status_t SoundTriggerHwService::dump(int fd, const Vector<String16>& args __unus
         result.appendFormat("Permission Denial: can't dump SoundTriggerHwService");
         write(fd, result.string(), result.size());
     } else {
-        bool locked = tryLock(mServiceLock);
+        bool locked = dumpTryLock(mServiceLock);
         // failed to lock - SoundTriggerHwService is probably deadlocked
         if (!locked) {
             result.append("SoundTriggerHwService may be deadlocked\n");
@@ -255,6 +274,37 @@ void SoundTriggerHwService::sendRecognitionEvent(struct sound_trigger_recognitio
 {
     if (module == NULL) {
         return;
+    }
+    struct sound_trigger_phrase_recognition_event newEvent;
+    if (event-> type == SOUND_MODEL_TYPE_KEYPHRASE && event->data_size != 0
+            && event->data_offset != sizeof(struct sound_trigger_phrase_recognition_event)) {
+        // set some defaults for the phrase if the recognition event won't be parsed properly
+        // TODO: read defaults from the config
+
+        memset(&newEvent, 0, sizeof(struct sound_trigger_phrase_recognition_event));
+
+        sp<Model> model = module->getModel(event->model);
+
+        newEvent.num_phrases = 1;
+        newEvent.phrase_extras[0].id = 100;
+        newEvent.phrase_extras[0].recognition_modes = RECOGNITION_MODE_VOICE_TRIGGER;
+        newEvent.phrase_extras[0].confidence_level = 100;
+        newEvent.phrase_extras[0].num_levels = 1;
+        newEvent.phrase_extras[0].levels[0].level = 100;
+        newEvent.phrase_extras[0].levels[0].user_id = 100;
+        newEvent.common.status = event->status;
+        newEvent.common.type = event->type;
+        newEvent.common.model = event->model;
+        newEvent.common.capture_available = event->capture_available;
+        newEvent.common.capture_session = event->capture_session;
+        newEvent.common.capture_delay_ms = event->capture_delay_ms;
+        newEvent.common.capture_preamble_ms = event->capture_preamble_ms;
+        newEvent.common.trigger_in_data = event->trigger_in_data;
+        newEvent.common.audio_config = event->audio_config;
+        newEvent.common.data_size = event->data_size;
+        newEvent.common.data_offset = sizeof(struct sound_trigger_phrase_recognition_event);
+
+        event = &newEvent.common;
     }
     sp<IMemory> eventMemory = prepareRecognitionEvent(event);
     if (eventMemory == 0) {
@@ -490,7 +540,8 @@ SoundTriggerHwService::Module::~Module() {
 }
 
 sp<SoundTriggerHwService::ModuleClient>
-SoundTriggerHwService::Module::addClient(const sp<ISoundTriggerClient>& client)
+SoundTriggerHwService::Module::addClient(const sp<ISoundTriggerClient>& client,
+                                         const String16& opPackageName)
 {
     AutoMutex lock(mLock);
     sp<ModuleClient> moduleClient;
@@ -501,7 +552,7 @@ SoundTriggerHwService::Module::addClient(const sp<ISoundTriggerClient>& client)
             return moduleClient;
         }
     }
-    moduleClient = new ModuleClient(this, client);
+    moduleClient = new ModuleClient(this, client, opPackageName);
 
     ALOGV("addClient() client %p", moduleClient.get());
     mModuleClients.add(moduleClient);
@@ -562,12 +613,14 @@ status_t SoundTriggerHwService::Module::loadSoundModel(const sp<IMemory>& modelM
     if (mHalInterface == 0) {
         return NO_INIT;
     }
-    if (modelMemory == 0 || modelMemory->pointer() == NULL) {
-        ALOGE("loadSoundModel() modelMemory is 0 or has NULL pointer()");
-        return BAD_VALUE;
+
+    auto immutableMemory = CopyToArray(modelMemory);
+    if (immutableMemory.first == nullptr) {
+        return NO_MEMORY;
     }
-    struct sound_trigger_sound_model *sound_model =
-            (struct sound_trigger_sound_model *)modelMemory->pointer();
+
+    struct sound_trigger_sound_model* sound_model =
+        (struct sound_trigger_sound_model*) immutableMemory.first.get();
 
     size_t structSize;
     if (sound_model->type == SOUND_MODEL_TYPE_KEYPHRASE) {
@@ -577,9 +630,10 @@ status_t SoundTriggerHwService::Module::loadSoundModel(const sp<IMemory>& modelM
     }
 
     if (sound_model->data_offset < structSize ||
-           sound_model->data_size > (UINT_MAX - sound_model->data_offset) ||
-           modelMemory->size() < sound_model->data_offset ||
-           sound_model->data_size > (modelMemory->size() - sound_model->data_offset)) {
+        sound_model->data_size > (UINT_MAX - sound_model->data_offset) ||
+        immutableMemory.second < sound_model->data_offset ||
+            sound_model->data_size >
+            (immutableMemory.second - sound_model->data_offset)) {
         android_errorWriteLog(0x534e4554, "30148546");
         ALOGE("loadSoundModel() data_size is too big");
         return BAD_VALUE;
@@ -659,19 +713,20 @@ status_t SoundTriggerHwService::Module::startRecognition(sound_model_handle_t ha
     if (mHalInterface == 0) {
         return NO_INIT;
     }
-    if (dataMemory == 0 || dataMemory->pointer() == NULL) {
-        ALOGE("startRecognition() dataMemory is 0 or has NULL pointer()");
-        return BAD_VALUE;
 
+    auto immutableMemory = CopyToArray(dataMemory);
+    if (immutableMemory.first == nullptr) {
+        return NO_MEMORY;
     }
 
-    struct sound_trigger_recognition_config *config =
-            (struct sound_trigger_recognition_config *)dataMemory->pointer();
+    struct sound_trigger_recognition_config* config =
+        (struct sound_trigger_recognition_config*) immutableMemory.first.get();
 
     if (config->data_offset < sizeof(struct sound_trigger_recognition_config) ||
-            config->data_size > (UINT_MAX - config->data_offset) ||
-            dataMemory->size() < config->data_offset ||
-            config->data_size > (dataMemory->size() - config->data_offset)) {
+        config->data_size > (UINT_MAX - config->data_offset) ||
+        immutableMemory.second < config->data_offset ||
+            config->data_size >
+            (immutableMemory.second - config->data_offset)) {
         ALOGE("startRecognition() data_size is too big");
         return BAD_VALUE;
     }
@@ -723,6 +778,25 @@ status_t SoundTriggerHwService::Module::stopRecognition(sound_model_handle_t han
     mHalInterface->stopRecognition(handle);
     model->mState = Model::STATE_IDLE;
     return NO_ERROR;
+}
+
+status_t SoundTriggerHwService::Module::getModelState(sound_model_handle_t handle)
+{
+    ALOGV("getModelState() model handle %d", handle);
+    if (mHalInterface == 0) {
+        return NO_INIT;
+    }
+    AutoMutex lock(mLock);
+    sp<Model> model = getModel(handle);
+    if (model == 0) {
+        return BAD_VALUE;
+    }
+
+    if (model->mState != Model::STATE_ACTIVE) {
+        return INVALID_OPERATION;
+    }
+
+    return mHalInterface->getModelState(handle);
 }
 
 void SoundTriggerHwService::Module::onCallbackEvent(const sp<CallbackEvent>& event)
@@ -913,8 +987,9 @@ SoundTriggerHwService::Model::Model(sound_model_handle_t handle, audio_session_t
 #define LOG_TAG "SoundTriggerHwService::ModuleClient"
 
 SoundTriggerHwService::ModuleClient::ModuleClient(const sp<Module>& module,
-                                                  const sp<ISoundTriggerClient>& client)
- : mModule(module), mClient(client)
+                                                  const sp<ISoundTriggerClient>& client,
+                                                  const String16& opPackageName)
+ : mModule(module), mClient(client), mOpPackageName(opPackageName)
 {
 }
 
@@ -938,7 +1013,8 @@ status_t SoundTriggerHwService::ModuleClient::dump(int fd __unused,
 
 void SoundTriggerHwService::ModuleClient::detach() {
     ALOGV("detach()");
-    if (!captureHotwordAllowed(IPCThreadState::self()->getCallingPid(),
+    if (!captureHotwordAllowed(mOpPackageName,
+                               IPCThreadState::self()->getCallingPid(),
                                IPCThreadState::self()->getCallingUid())) {
         return;
     }
@@ -962,9 +1038,13 @@ status_t SoundTriggerHwService::ModuleClient::loadSoundModel(const sp<IMemory>& 
                                 sound_model_handle_t *handle)
 {
     ALOGV("loadSoundModel() handle");
-    if (!captureHotwordAllowed(IPCThreadState::self()->getCallingPid(),
+    if (!captureHotwordAllowed(mOpPackageName,
+                               IPCThreadState::self()->getCallingPid(),
                                IPCThreadState::self()->getCallingUid())) {
         return PERMISSION_DENIED;
+    }
+    if (checkIMemory(modelMemory) != NO_ERROR) {
+        return BAD_VALUE;
     }
 
     sp<Module> module = mModule.promote();
@@ -977,7 +1057,8 @@ status_t SoundTriggerHwService::ModuleClient::loadSoundModel(const sp<IMemory>& 
 status_t SoundTriggerHwService::ModuleClient::unloadSoundModel(sound_model_handle_t handle)
 {
     ALOGV("unloadSoundModel() model handle %d", handle);
-    if (!captureHotwordAllowed(IPCThreadState::self()->getCallingPid(),
+    if (!captureHotwordAllowed(mOpPackageName,
+                               IPCThreadState::self()->getCallingPid(),
                                IPCThreadState::self()->getCallingUid())) {
         return PERMISSION_DENIED;
     }
@@ -993,9 +1074,13 @@ status_t SoundTriggerHwService::ModuleClient::startRecognition(sound_model_handl
                                  const sp<IMemory>& dataMemory)
 {
     ALOGV("startRecognition() model handle %d", handle);
-    if (!captureHotwordAllowed(IPCThreadState::self()->getCallingPid(),
+    if (!captureHotwordAllowed(mOpPackageName,
+                               IPCThreadState::self()->getCallingPid(),
                                IPCThreadState::self()->getCallingUid())) {
         return PERMISSION_DENIED;
+    }
+    if (checkIMemory(dataMemory) != NO_ERROR) {
+        return BAD_VALUE;
     }
 
     sp<Module> module = mModule.promote();
@@ -1008,7 +1093,8 @@ status_t SoundTriggerHwService::ModuleClient::startRecognition(sound_model_handl
 status_t SoundTriggerHwService::ModuleClient::stopRecognition(sound_model_handle_t handle)
 {
     ALOGV("stopRecognition() model handle %d", handle);
-    if (!captureHotwordAllowed(IPCThreadState::self()->getCallingPid(),
+    if (!captureHotwordAllowed(mOpPackageName,
+                               IPCThreadState::self()->getCallingPid(),
                                IPCThreadState::self()->getCallingUid())) {
         return PERMISSION_DENIED;
     }
@@ -1018,6 +1104,22 @@ status_t SoundTriggerHwService::ModuleClient::stopRecognition(sound_model_handle
         return NO_INIT;
     }
     return module->stopRecognition(handle);
+}
+
+status_t SoundTriggerHwService::ModuleClient::getModelState(sound_model_handle_t handle)
+{
+    ALOGV("getModelState() model handle %d", handle);
+    if (!captureHotwordAllowed(mOpPackageName,
+                               IPCThreadState::self()->getCallingPid(),
+                               IPCThreadState::self()->getCallingUid())) {
+        return PERMISSION_DENIED;
+    }
+
+    sp<Module> module = mModule.promote();
+    if (module == 0) {
+        return NO_INIT;
+    }
+    return module->getModelState(handle);
 }
 
 void SoundTriggerHwService::ModuleClient::setCaptureState_l(bool active)

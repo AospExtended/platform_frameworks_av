@@ -24,14 +24,15 @@
 #include <cutils/misc.h>
 #include <media/AudioEffect.h>
 #include <media/EffectsConfig.h>
+#include <mediautils/ServiceUtilities.h>
 #include <system/audio.h>
 #include <system/audio_effects/audio_effects_conf.h>
 #include <utils/Vector.h>
 #include <utils/SortedVector.h>
 #include <cutils/config_utils.h>
 #include <binder/IPCThreadState.h>
+#include "AudioPolicyService.h"
 #include "AudioPolicyEffects.h"
-#include "ServiceUtilities.h"
 
 namespace android {
 
@@ -39,7 +40,8 @@ namespace android {
 // AudioPolicyEffects Implementation
 // ----------------------------------------------------------------------------
 
-AudioPolicyEffects::AudioPolicyEffects()
+AudioPolicyEffects::AudioPolicyEffects(AudioPolicyService *audioPolicyService) :
+    mAudioPolicyService(audioPolicyService)
 {
     status_t loadResult = loadAudioEffectXmlConfig();
     if (loadResult < 0) {
@@ -235,6 +237,8 @@ status_t AudioPolicyEffects::addOutputSessionEffects(audio_io_handle_t output,
 {
     status_t status = NO_ERROR;
 
+    ALOGV("addOutputSessionEffects %d", audioSession);
+
     Mutex::Autolock _l(mLock);
     // create audio processors according to stream
     // FIXME: should we have specific post processing settings for internal streams?
@@ -242,6 +246,22 @@ status_t AudioPolicyEffects::addOutputSessionEffects(audio_io_handle_t output,
     if (stream >= AUDIO_STREAM_PUBLIC_CNT) {
         stream = AUDIO_STREAM_MUSIC;
     }
+
+    // send the streaminfo notification only once
+    ssize_t sidx = mOutputAudioSessionInfo.indexOfKey(audioSession);
+    if (sidx >= 0) {
+        // AudioSessionInfo is existing and we just need to increase ref count
+        sp<AudioSessionInfo> info = mOutputAudioSessionInfo.valueAt(sidx);
+        info->mRefCount++;
+
+        if (info->mRefCount == 1) {
+            mAudioPolicyService->onOutputSessionEffectsUpdate(info, true);
+        }
+        ALOGV("addOutputSessionEffects(): session info %d refCount=%d", audioSession, info->mRefCount);
+    } else {
+        ALOGV("addOutputSessionEffects(): no output stream info found for stream");
+    }
+
     ssize_t index = mOutputStreams.indexOfKey(stream);
     if (index < 0) {
         ALOGV("addOutputSessionEffects(): no output processing needed for this stream");
@@ -287,6 +307,86 @@ status_t AudioPolicyEffects::addOutputSessionEffects(audio_io_handle_t output,
     return status;
 }
 
+status_t AudioPolicyEffects::releaseOutputAudioSessionInfo(audio_io_handle_t /* output */,
+                                           audio_stream_type_t stream,
+                                           audio_session_t session)
+{
+    if (uint32_t(stream) >= AUDIO_STREAM_CNT) {
+        return BAD_VALUE;
+    }
+
+    Mutex::Autolock _l(mLock);
+
+    ssize_t idx = mOutputAudioSessionInfo.indexOfKey(session);
+    if (idx >= 0) {
+        sp<AudioSessionInfo> info = mOutputAudioSessionInfo.valueAt(idx);
+        if (info->mRefCount == 0) {
+            mOutputAudioSessionInfo.removeItemsAt(idx);
+        }
+        ALOGV("releaseOutputAudioSessionInfo() sessionId=%d refcount=%d",
+                session, info->mRefCount);
+    } else {
+        ALOGV("releaseOutputAudioSessionInfo() no session info found");
+    }
+    return NO_ERROR;
+}
+
+status_t AudioPolicyEffects::updateOutputAudioSessionInfo(audio_io_handle_t /* output */,
+                                           audio_stream_type_t stream,
+                                           audio_session_t session,
+                                           audio_output_flags_t flags,
+                                           const audio_config_t *config, uid_t uid)
+{
+    if (uint32_t(stream) >= AUDIO_STREAM_CNT) {
+        return BAD_VALUE;
+    }
+
+    Mutex::Autolock _l(mLock);
+
+    // TODO: Handle other stream types based on client registration
+    if (stream != AUDIO_STREAM_MUSIC) {
+        return NO_ERROR;
+    }
+
+    // update AudioSessionInfo. This is used in the stream open/close path
+    // to notify userspace applications about session creation and
+    // teardown, allowing the app to make decisions about effects for
+    // a particular stream. This is independent of the current
+    // output_session_processing feature which forcibly attaches a
+    // static list of effects to a stream.
+    ssize_t idx = mOutputAudioSessionInfo.indexOfKey(session);
+    sp<AudioSessionInfo> info;
+    if (idx < 0) {
+        info = new AudioSessionInfo(session, stream, flags, config->channel_mask, uid);
+        mOutputAudioSessionInfo.add(session, info);
+    } else {
+        // the streaminfo may actually change
+        info = mOutputAudioSessionInfo.valueAt(idx);
+        info->mFlags = flags;
+        info->mChannelMask = config->channel_mask;
+    }
+
+    ALOGV("updateOutputAudioSessionInfo() sessionId=%d, flags=0x%x, channel_mask=0x%x uid=%d refCount=%d",
+            info->mSessionId, info->mFlags, info->mChannelMask, info->mUid, info->mRefCount);
+
+    return NO_ERROR;
+}
+
+status_t AudioPolicyEffects::listAudioSessions(audio_stream_type_t streams,
+                                               Vector< sp<AudioSessionInfo>> &sessions)
+{
+    ALOGV("listAudioSessions() streams %d", streams);
+
+    for (unsigned int i = 0; i < mOutputAudioSessionInfo.size(); i++) {
+        sp<AudioSessionInfo> info = mOutputAudioSessionInfo.valueAt(i);
+        if (streams == -1 || info->mStream == streams) {
+            sessions.push_back(info);
+        }
+    }
+
+    return NO_ERROR;
+}
+
 status_t AudioPolicyEffects::releaseOutputSessionEffects(audio_io_handle_t output,
                          audio_stream_type_t stream,
                          audio_session_t audioSession)
@@ -296,7 +396,19 @@ status_t AudioPolicyEffects::releaseOutputSessionEffects(audio_io_handle_t outpu
     (void) stream; // argument not used for now
 
     Mutex::Autolock _l(mLock);
-    ssize_t index = mOutputSessions.indexOfKey(audioSession);
+    ssize_t index = mOutputAudioSessionInfo.indexOfKey(audioSession);
+    if (index >= 0) {
+        sp<AudioSessionInfo> info = mOutputAudioSessionInfo.valueAt(index);
+        info->mRefCount--;
+        if (info->mRefCount == 0) {
+            mAudioPolicyService->onOutputSessionEffectsUpdate(info, false);
+        }
+        ALOGV("releaseOutputSessionEffects(): session=%d refCount=%d", info->mSessionId, info->mRefCount);
+    } else {
+        ALOGV("releaseOutputSessionEffects: no stream info was attached to this stream");
+    }
+
+    index = mOutputSessions.indexOfKey(audioSession);
     if (index < 0) {
         ALOGV("releaseOutputSessionEffects: no output processing was attached to this stream");
         return NO_ERROR;
@@ -317,6 +429,201 @@ status_t AudioPolicyEffects::releaseOutputSessionEffects(audio_io_handle_t outpu
     return status;
 }
 
+status_t AudioPolicyEffects::addSourceDefaultEffect(const effect_uuid_t *type,
+                                                    const String16& opPackageName,
+                                                    const effect_uuid_t *uuid,
+                                                    int32_t priority,
+                                                    audio_source_t source,
+                                                    audio_unique_id_t* id)
+{
+    if (uuid == NULL || type == NULL) {
+        ALOGE("addSourceDefaultEffect(): Null uuid or type uuid pointer");
+        return BAD_VALUE;
+    }
+
+    // HOTWORD, FM_TUNER and ECHO_REFERENCE are special case sources > MAX.
+    if (source < AUDIO_SOURCE_DEFAULT ||
+            (source > AUDIO_SOURCE_MAX &&
+             source != AUDIO_SOURCE_HOTWORD &&
+             source != AUDIO_SOURCE_FM_TUNER &&
+             source != AUDIO_SOURCE_ECHO_REFERENCE)) {
+        ALOGE("addSourceDefaultEffect(): Unsupported source type %d", source);
+        return BAD_VALUE;
+    }
+
+    // Check that |uuid| or |type| corresponds to an effect on the system.
+    effect_descriptor_t descriptor = {};
+    status_t res = AudioEffect::getEffectDescriptor(
+            uuid, type, EFFECT_FLAG_TYPE_PRE_PROC, &descriptor);
+    if (res != OK) {
+        ALOGE("addSourceDefaultEffect(): Failed to find effect descriptor matching uuid/type.");
+        return res;
+    }
+
+    // Only pre-processing effects can be added dynamically as source defaults.
+    if ((descriptor.flags & EFFECT_FLAG_TYPE_MASK) != EFFECT_FLAG_TYPE_PRE_PROC) {
+        ALOGE("addSourceDefaultEffect(): Desired effect cannot be attached "
+              "as a source default effect.");
+        return BAD_VALUE;
+    }
+
+    Mutex::Autolock _l(mLock);
+
+    // Find the EffectDescVector for the given source type, or create a new one if necessary.
+    ssize_t index = mInputSources.indexOfKey(source);
+    EffectDescVector *desc = NULL;
+    if (index < 0) {
+        // No effects for this source type yet.
+        desc = new EffectDescVector();
+        mInputSources.add(source, desc);
+    } else {
+        desc = mInputSources.valueAt(index);
+    }
+
+    // Create a new effect and add it to the vector.
+    res = AudioEffect::newEffectUniqueId(id);
+    if (res != OK) {
+        ALOGE("addSourceDefaultEffect(): failed to get new unique id.");
+        return res;
+    }
+    EffectDesc *effect = new EffectDesc(
+            descriptor.name, *type, opPackageName, *uuid, priority, *id);
+    desc->mEffects.add(effect);
+    // TODO(b/71813697): Support setting params as well.
+
+    // TODO(b/71814300): Retroactively attach to any existing sources of the given type.
+    // This requires tracking the source type of each session id in addition to what is
+    // already being tracked.
+
+    return NO_ERROR;
+}
+
+status_t AudioPolicyEffects::addStreamDefaultEffect(const effect_uuid_t *type,
+                                                    const String16& opPackageName,
+                                                    const effect_uuid_t *uuid,
+                                                    int32_t priority,
+                                                    audio_usage_t usage,
+                                                    audio_unique_id_t* id)
+{
+    if (uuid == NULL || type == NULL) {
+        ALOGE("addStreamDefaultEffect(): Null uuid or type uuid pointer");
+        return BAD_VALUE;
+    }
+    audio_stream_type_t stream = AudioSystem::attributesToStreamType(attributes_initializer(usage));
+
+    if (stream < AUDIO_STREAM_MIN || stream >= AUDIO_STREAM_PUBLIC_CNT) {
+        ALOGE("addStreamDefaultEffect(): Unsupported stream type %d", stream);
+        return BAD_VALUE;
+    }
+
+    // Check that |uuid| or |type| corresponds to an effect on the system.
+    effect_descriptor_t descriptor = {};
+    status_t res = AudioEffect::getEffectDescriptor(
+            uuid, type, EFFECT_FLAG_TYPE_INSERT, &descriptor);
+    if (res != OK) {
+        ALOGE("addStreamDefaultEffect(): Failed to find effect descriptor matching uuid/type.");
+        return res;
+    }
+
+    // Only insert effects can be added dynamically as stream defaults.
+    if ((descriptor.flags & EFFECT_FLAG_TYPE_MASK) != EFFECT_FLAG_TYPE_INSERT) {
+        ALOGE("addStreamDefaultEffect(): Desired effect cannot be attached "
+              "as a stream default effect.");
+        return BAD_VALUE;
+    }
+
+    Mutex::Autolock _l(mLock);
+
+    // Find the EffectDescVector for the given stream type, or create a new one if necessary.
+    ssize_t index = mOutputStreams.indexOfKey(stream);
+    EffectDescVector *desc = NULL;
+    if (index < 0) {
+        // No effects for this stream type yet.
+        desc = new EffectDescVector();
+        mOutputStreams.add(stream, desc);
+    } else {
+        desc = mOutputStreams.valueAt(index);
+    }
+
+    // Create a new effect and add it to the vector.
+    res = AudioEffect::newEffectUniqueId(id);
+    if (res != OK) {
+        ALOGE("addStreamDefaultEffect(): failed to get new unique id.");
+        return res;
+    }
+    EffectDesc *effect = new EffectDesc(
+            descriptor.name, *type, opPackageName, *uuid, priority, *id);
+    desc->mEffects.add(effect);
+    // TODO(b/71813697): Support setting params as well.
+
+    // TODO(b/71814300): Retroactively attach to any existing streams of the given type.
+    // This requires tracking the stream type of each session id in addition to what is
+    // already being tracked.
+
+    return NO_ERROR;
+}
+
+status_t AudioPolicyEffects::removeSourceDefaultEffect(audio_unique_id_t id)
+{
+    if (id == AUDIO_UNIQUE_ID_ALLOCATE) {
+        // ALLOCATE is not a unique identifier, but rather a reserved value indicating
+        // a real id has not been assigned. For default effects, this value is only used
+        // by system-owned defaults from the loaded config, which cannot be removed.
+        return BAD_VALUE;
+    }
+
+    Mutex::Autolock _l(mLock);
+
+    // Check each source type.
+    size_t numSources = mInputSources.size();
+    for (size_t i = 0; i < numSources; ++i) {
+        // Check each effect for each source.
+        EffectDescVector* descVector = mInputSources[i];
+        for (auto desc = descVector->mEffects.begin(); desc != descVector->mEffects.end(); ++desc) {
+            if ((*desc)->mId == id) {
+                // Found it!
+                // TODO(b/71814300): Remove from any sources the effect was attached to.
+                descVector->mEffects.erase(desc);
+                // Handles are unique; there can only be one match, so return early.
+                return NO_ERROR;
+            }
+        }
+    }
+
+    // Effect wasn't found, so it's been trivially removed successfully.
+    return NO_ERROR;
+}
+
+status_t AudioPolicyEffects::removeStreamDefaultEffect(audio_unique_id_t id)
+{
+    if (id == AUDIO_UNIQUE_ID_ALLOCATE) {
+        // ALLOCATE is not a unique identifier, but rather a reserved value indicating
+        // a real id has not been assigned. For default effects, this value is only used
+        // by system-owned defaults from the loaded config, which cannot be removed.
+        return BAD_VALUE;
+    }
+
+    Mutex::Autolock _l(mLock);
+
+    // Check each stream type.
+    size_t numStreams = mOutputStreams.size();
+    for (size_t i = 0; i < numStreams; ++i) {
+        // Check each effect for each stream.
+        EffectDescVector* descVector = mOutputStreams[i];
+        for (auto desc = descVector->mEffects.begin(); desc != descVector->mEffects.end(); ++desc) {
+            if ((*desc)->mId == id) {
+                // Found it!
+                // TODO(b/71814300): Remove from any streams the effect was attached to.
+                descVector->mEffects.erase(desc);
+                // Handles are unique; there can only be one match, so return early.
+                return NO_ERROR;
+            }
+        }
+    }
+
+    // Effect wasn't found, so it's been trivially removed successfully.
+    return NO_ERROR;
+}
 
 void AudioPolicyEffects::EffectVector::setProcessorEnabled(bool enabled)
 {
@@ -338,7 +645,8 @@ void AudioPolicyEffects::EffectVector::setProcessorEnabled(bool enabled)
     CAMCORDER_SRC_TAG,
     VOICE_REC_SRC_TAG,
     VOICE_COMM_SRC_TAG,
-    UNPROCESSED_SRC_TAG
+    UNPROCESSED_SRC_TAG,
+    VOICE_PERFORMANCE_SRC_TAG
 };
 
 // returns the audio_source_t enum corresponding to the input source name or
@@ -460,12 +768,13 @@ size_t AudioPolicyEffects::readParamValue(cnode *node,
         len = strnlen(node->value, EFFECT_STRING_LEN_MAX);
         if (*curSize + len + 1 > *totSize) {
             *totSize = *curSize + len + 1;
-            *param = (char *)realloc(*param, *totSize);
-            if (*param == NULL) {
+            char *newParam = (char *)realloc(*param, *totSize);
+            if (newParam == NULL) {
                 len = 0;
                 ALOGE("%s realloc error for string len %zu", __func__, *totSize);
                 goto exit;
             }
+            *param = newParam;
         }
         strncpy(*param + *curSize, node->value, len);
         *curSize += len;

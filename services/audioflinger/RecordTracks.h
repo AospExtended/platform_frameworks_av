@@ -19,6 +19,39 @@
     #error This header file should only be included from AudioFlinger.h
 #endif
 
+// Checks and monitors OP_RECORD_AUDIO
+class OpRecordAudioMonitor : public RefBase {
+public:
+    ~OpRecordAudioMonitor() override;
+    bool hasOpRecordAudio() const;
+
+    static sp<OpRecordAudioMonitor> createIfNeeded(uid_t uid, const String16& opPackageName);
+
+private:
+    OpRecordAudioMonitor(uid_t uid, const String16& opPackageName);
+    void onFirstRef() override;
+
+    AppOpsManager mAppOpsManager;
+
+    class RecordAudioOpCallback : public BnAppOpsCallback {
+    public:
+        explicit RecordAudioOpCallback(const wp<OpRecordAudioMonitor>& monitor);
+        void opChanged(int32_t op, const String16& packageName) override;
+
+    private:
+        const wp<OpRecordAudioMonitor> mMonitor;
+    };
+
+    sp<RecordAudioOpCallback> mOpCallback;
+    // called by RecordAudioOpCallback when OP_RECORD_AUDIO is updated in AppOp callback
+    // and in onFirstRef()
+    void checkRecordAudio();
+
+    std::atomic_bool mHasOpRecordAudio;
+    const uid_t mUid;
+    const String16 mPackage;
+};
+
 // record track
 class RecordTrack : public TrackBase {
 public:
@@ -32,9 +65,11 @@ public:
                                 void *buffer,
                                 size_t bufferSize,
                                 audio_session_t sessionId,
+                                pid_t creatorPid,
                                 uid_t uid,
                                 audio_input_flags_t flags,
                                 track_type type,
+                                const String16& opPackageName,
                                 audio_port_handle_t portId = AUDIO_PORT_HANDLE_NONE);
     virtual             ~RecordTrack();
     virtual status_t    initCheck() const;
@@ -51,7 +86,7 @@ public:
             bool        setOverflow() { bool tmp = mOverflow; mOverflow = true;
                                                 return tmp; }
 
-    static  void        appendDumpHeader(String8& result);
+            void        appendDumpHeader(String8& result);
             void        appendDump(String8& result, bool active);
 
             void        handleSyncStartEvent(const sp<SyncEvent>& event);
@@ -63,11 +98,22 @@ public:
                                              const ExtendedTimestamp &timestamp);
 
     virtual bool        isFastTrack() const { return (mFlags & AUDIO_INPUT_FLAG_FAST) != 0; }
+            bool        isDirect() const override
+                                { return (mFlags & AUDIO_INPUT_FLAG_DIRECT) != 0; }
 
             void        setSilenced(bool silenced) { if (!isPatchTrack()) mSilenced = silenced; }
-            bool        isSilenced() const { return mSilenced; }
+            bool        isSilenced() const;
 
             status_t    getActiveMicrophones(std::vector<media::MicrophoneInfo>* activeMicrophones);
+
+            status_t    setPreferredMicrophoneDirection(audio_microphone_direction_t direction);
+            status_t    setPreferredMicrophoneFieldDimension(float zoom);
+
+    static  bool        checkServerLatencySupported(
+                                audio_format_t format, audio_input_flags_t flags) {
+                            return audio_is_linear_pcm(format)
+                                    && (flags & AUDIO_INPUT_FLAG_HW_AV_SYNC) == 0;
+                        }
 
 private:
     friend class AudioFlinger;  // for mState
@@ -99,10 +145,15 @@ private:
             audio_input_flags_t                mFlags;
 
             bool                               mSilenced;
+
+            // used to enforce OP_RECORD_AUDIO
+            uid_t                              mUid;
+            String16                           mOpPackageName;
+            sp<OpRecordAudioMonitor>           mOpRecordAudioMonitor;
 };
 
 // playback track, used by PatchPanel
-class PatchRecord : virtual public RecordTrack, public PatchProxyBufferProvider {
+class PatchRecord : public RecordTrack, public PatchTrackBase {
 public:
 
     PatchRecord(RecordThread *recordThread,
@@ -112,7 +163,8 @@ public:
                 size_t frameCount,
                 void *buffer,
                 size_t bufferSize,
-                audio_input_flags_t flags);
+                audio_input_flags_t flags,
+                const Timeout& timeout = {});
     virtual             ~PatchRecord();
 
     // AudioBufferProvider interface
@@ -123,11 +175,4 @@ public:
     virtual status_t    obtainBuffer(Proxy::Buffer *buffer,
                                      const struct timespec *timeOut = NULL);
     virtual void        releaseBuffer(Proxy::Buffer *buffer);
-
-    void setPeerProxy(PatchProxyBufferProvider *proxy) { mPeerProxy = proxy; }
-
-private:
-    sp<ClientProxy>             mProxy;
-    PatchProxyBufferProvider*   mPeerProxy;
-    struct timespec             mPeerTimeout;
 };  // end of PatchRecord

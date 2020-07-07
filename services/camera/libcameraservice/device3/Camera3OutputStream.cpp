@@ -54,9 +54,8 @@ Camera3OutputStream::Camera3OutputStream(int id,
         mState = STATE_ERROR;
     }
 
-    if (setId > CAMERA3_STREAM_SET_ID_INVALID) {
-        mBufferReleasedListener = new BufferReleasedListener(this);
-    }
+    bool needsReleaseNotify = setId > CAMERA3_STREAM_SET_ID_INVALID;
+    mBufferProducerListener = new BufferProducerListener(this, needsReleaseNotify);
 }
 
 Camera3OutputStream::Camera3OutputStream(int id,
@@ -87,9 +86,8 @@ Camera3OutputStream::Camera3OutputStream(int id,
         mState = STATE_ERROR;
     }
 
-    if (setId > CAMERA3_STREAM_SET_ID_INVALID) {
-        mBufferReleasedListener = new BufferReleasedListener(this);
-    }
+    bool needsReleaseNotify = setId > CAMERA3_STREAM_SET_ID_INVALID;
+    mBufferProducerListener = new BufferProducerListener(this, needsReleaseNotify);
 }
 
 Camera3OutputStream::Camera3OutputStream(int id,
@@ -124,10 +122,8 @@ Camera3OutputStream::Camera3OutputStream(int id,
     }
 
     mConsumerName = String8("Deferred");
-    if (setId > CAMERA3_STREAM_SET_ID_INVALID) {
-        mBufferReleasedListener = new BufferReleasedListener(this);
-    }
-
+    bool needsReleaseNotify = setId > CAMERA3_STREAM_SET_ID_INVALID;
+    mBufferProducerListener = new BufferProducerListener(this, needsReleaseNotify);
 }
 
 Camera3OutputStream::Camera3OutputStream(int id, camera3_stream_type_t type,
@@ -151,9 +147,8 @@ Camera3OutputStream::Camera3OutputStream(int id, camera3_stream_type_t type,
         mDropBuffers(false),
         mDequeueBufferLatency(kDequeueLatencyBinSize) {
 
-    if (setId > CAMERA3_STREAM_SET_ID_INVALID) {
-        mBufferReleasedListener = new BufferReleasedListener(this);
-    }
+    bool needsReleaseNotify = setId > CAMERA3_STREAM_SET_ID_INVALID;
+    mBufferProducerListener = new BufferProducerListener(this, needsReleaseNotify);
 
     // Subclasses expected to initialize mConsumer themselves
 }
@@ -187,16 +182,17 @@ status_t Camera3OutputStream::getBufferLocked(camera3_stream_buffer *buffer,
 }
 
 status_t Camera3OutputStream::queueBufferToConsumer(sp<ANativeWindow>& consumer,
-            ANativeWindowBuffer* buffer, int anwReleaseFence) {
+            ANativeWindowBuffer* buffer, int anwReleaseFence,
+            const std::vector<size_t>&) {
     return consumer->queueBuffer(consumer.get(), buffer, anwReleaseFence);
 }
 
 status_t Camera3OutputStream::returnBufferLocked(
         const camera3_stream_buffer &buffer,
-        nsecs_t timestamp) {
+        nsecs_t timestamp, const std::vector<size_t>& surface_ids) {
     ATRACE_CALL();
 
-    status_t res = returnAnyBufferLocked(buffer, timestamp, /*output*/true);
+    status_t res = returnAnyBufferLocked(buffer, timestamp, /*output*/true, surface_ids);
 
     if (res != OK) {
         return res;
@@ -212,6 +208,7 @@ status_t Camera3OutputStream::returnBufferCheckedLocked(
             const camera3_stream_buffer &buffer,
             nsecs_t timestamp,
             bool output,
+            const std::vector<size_t>& surface_ids,
             /*out*/
             sp<Fence> *releaseFenceOut) {
 
@@ -231,24 +228,27 @@ status_t Camera3OutputStream::returnBufferCheckedLocked(
      * queueBuffer
      */
     sp<ANativeWindow> currentConsumer = mConsumer;
+    StreamState state = mState;
     mLock.unlock();
 
     ANativeWindowBuffer *anwBuffer = container_of(buffer.buffer, ANativeWindowBuffer, handle);
     /**
      * Return buffer back to ANativeWindow
      */
-    if (buffer.status == CAMERA3_BUFFER_STATUS_ERROR || mDropBuffers) {
+    if (buffer.status == CAMERA3_BUFFER_STATUS_ERROR || mDropBuffers || timestamp == 0) {
         // Cancel buffer
         if (mDropBuffers) {
             ALOGV("%s: Dropping a frame for stream %d.", __FUNCTION__, mId);
+        } else if (buffer.status == CAMERA3_BUFFER_STATUS_ERROR) {
+            ALOGV("%s: A frame is dropped for stream %d due to buffer error.", __FUNCTION__, mId);
         } else {
-            ALOGW("%s: A frame is dropped for stream %d due to buffer error.", __FUNCTION__, mId);
+            ALOGE("%s: Stream %d: timestamp shouldn't be 0", __FUNCTION__, mId);
         }
 
         res = currentConsumer->cancelBuffer(currentConsumer.get(),
                 anwBuffer,
                 anwReleaseFence);
-        if (res != OK) {
+        if (shouldLogError(res, state)) {
             ALOGE("%s: Stream %d: Error cancelling buffer to native window:"
                   " %s (%d)", __FUNCTION__, mId, strerror(-res), res);
         }
@@ -256,7 +256,7 @@ status_t Camera3OutputStream::returnBufferCheckedLocked(
         notifyBufferReleased(anwBuffer);
         if (mUseBufferManager) {
             // Return this buffer back to buffer manager.
-            mBufferReleasedListener->onBufferReleased();
+            mBufferProducerListener->onBufferReleased();
         }
     } else {
         if (mTraceFirstBuffer && (stream_type == CAMERA3_STREAM_OUTPUT)) {
@@ -279,10 +279,10 @@ status_t Camera3OutputStream::returnBufferCheckedLocked(
             return res;
         }
 
-        res = queueBufferToConsumer(currentConsumer, anwBuffer, anwReleaseFence);
-        if (res != OK) {
-            ALOGE("%s: Stream %d: Error queueing buffer to native window: "
-                  "%s (%d)", __FUNCTION__, mId, strerror(-res), res);
+        res = queueBufferToConsumer(currentConsumer, anwBuffer, anwReleaseFence, surface_ids);
+        if (shouldLogError(res, state)) {
+            ALOGE("%s: Stream %d: Error queueing buffer to native window:"
+                  " %s (%d)", __FUNCTION__, mId, strerror(-res), res);
         }
     }
     mLock.lock();
@@ -355,7 +355,18 @@ status_t Camera3OutputStream::configureQueueLocked() {
     // Set dequeueBuffer/attachBuffer timeout if the consumer is not hw composer or hw texture.
     // We need skip these cases as timeout will disable the non-blocking (async) mode.
     if (!(isConsumedByHWComposer() || isConsumedByHWTexture())) {
-        mConsumer->setDequeueTimeout(kDequeueBufferTimeout);
+        if (mUseBufferManager) {
+            // When buffer manager is handling the buffer, we should have available buffers in
+            // buffer queue before we calls into dequeueBuffer because buffer manager is tracking
+            // free buffers.
+            // There are however some consumer side feature (ImageReader::discardFreeBuffers) that
+            // can discard free buffers without notifying buffer manager. We want the timeout to
+            // happen immediately here so buffer manager can try to update its internal state and
+            // try to allocate a buffer instead of waiting.
+            mConsumer->setDequeueTimeout(0);
+        } else {
+            mConsumer->setDequeueTimeout(kDequeueBufferTimeout);
+        }
     }
 
     return OK;
@@ -371,8 +382,8 @@ status_t Camera3OutputStream::configureConsumerQueueLocked() {
     // Configure consumer-side ANativeWindow interface. The listener may be used
     // to notify buffer manager (if it is used) of the returned buffers.
     res = mConsumer->connect(NATIVE_WINDOW_API_CAMERA,
-            /*listener*/mBufferReleasedListener,
-            /*reportBufferRemoval*/true);
+            /*reportBufferRemoval*/true,
+            /*listener*/mBufferProducerListener);
     if (res != OK) {
         ALOGE("%s: Unable to connect to native window for stream %d",
                 __FUNCTION__, mId);
@@ -475,8 +486,11 @@ status_t Camera3OutputStream::configureConsumerQueueLocked() {
      * sets the mBufferManager if device version is > HAL3.2, which guarantees that the buffer
      * manager setup is skipped in below code. Note that HAL3.2 is also excluded here, as some
      * HAL3.2 devices may not support the dynamic buffer registeration.
+     * Also Camera3BufferManager does not support display/texture streams as they have its own
+     * buffer management logic.
      */
-    if (mBufferManager != 0 && mSetId > CAMERA3_STREAM_SET_ID_INVALID) {
+    if (mBufferManager != 0 && mSetId > CAMERA3_STREAM_SET_ID_INVALID &&
+            !(isConsumedByHWComposer() || isConsumedByHWTexture())) {
         uint64_t consumerUsage = 0;
         getEndpointUsage(&consumerUsage);
         StreamInfo streamInfo(
@@ -519,9 +533,12 @@ status_t Camera3OutputStream::getBufferLockedCommon(ANativeWindowBuffer** anb, i
             // successful return.
             *anb = gb.get();
             res = mConsumer->attachBuffer(*anb);
-            if (res != OK) {
+            if (shouldLogError(res, mState)) {
                 ALOGE("%s: Stream %d: Can't attach the output buffer to this surface: %s (%d)",
                         __FUNCTION__, mId, strerror(-res), res);
+            }
+            if (res != OK) {
+                checkRetAndSetAbandonedLocked(res);
                 return res;
             }
             gotBufferFromManager = true;
@@ -558,33 +575,80 @@ status_t Camera3OutputStream::getBufferLockedCommon(ANativeWindowBuffer** anb, i
         mDequeueBufferLatency.add(dequeueStart, dequeueEnd);
 
         mLock.lock();
-        if (res != OK) {
-            ALOGE("%s: Stream %d: Can't dequeue next output buffer: %s (%d)",
-                    __FUNCTION__, mId, strerror(-res), res);
 
-            // Only transition to STATE_ABANDONED from STATE_CONFIGURED. (If it is STATE_PREPARING,
-            // let prepareNextBuffer handle the error.)
-            if ((res == NO_INIT || res == DEAD_OBJECT) && mState == STATE_CONFIGURED) {
-                mState = STATE_ABANDONED;
+        if (mUseBufferManager && res == TIMED_OUT) {
+            checkRemovedBuffersLocked();
+
+            sp<GraphicBuffer> gb;
+            res = mBufferManager->getBufferForStream(
+                    getId(), getStreamSetId(), &gb, fenceFd, /*noFreeBuffer*/true);
+
+            if (res == OK) {
+                // Attach this buffer to the bufferQueue: the buffer will be in dequeue state after
+                // a successful return.
+                *anb = gb.get();
+                res = mConsumer->attachBuffer(*anb);
+                gotBufferFromManager = true;
+                ALOGV("Stream %d: Attached new buffer", getId());
+
+                if (res != OK) {
+                    if (shouldLogError(res, mState)) {
+                        ALOGE("%s: Stream %d: Can't attach the output buffer to this surface:"
+                                " %s (%d)", __FUNCTION__, mId, strerror(-res), res);
+                    }
+                    checkRetAndSetAbandonedLocked(res);
+                    return res;
+                }
+            } else {
+                ALOGE("%s: Stream %d: Can't get next output buffer from buffer manager:"
+                        " %s (%d)", __FUNCTION__, mId, strerror(-res), res);
+                return res;
             }
-
+        } else if (res != OK) {
+            if (shouldLogError(res, mState)) {
+                ALOGE("%s: Stream %d: Can't dequeue next output buffer: %s (%d)",
+                        __FUNCTION__, mId, strerror(-res), res);
+            }
+            checkRetAndSetAbandonedLocked(res);
             return res;
         }
     }
 
     if (res == OK) {
-        std::vector<sp<GraphicBuffer>> removedBuffers;
-        res = mConsumer->getAndFlushRemovedBuffers(&removedBuffers);
-        if (res == OK) {
-            onBuffersRemovedLocked(removedBuffers);
-
-            if (mUseBufferManager && removedBuffers.size() > 0) {
-                mBufferManager->onBuffersRemoved(getId(), getStreamSetId(), removedBuffers.size());
-            }
-        }
+        checkRemovedBuffersLocked();
     }
 
     return res;
+}
+
+void Camera3OutputStream::checkRemovedBuffersLocked(bool notifyBufferManager) {
+    std::vector<sp<GraphicBuffer>> removedBuffers;
+    status_t res = mConsumer->getAndFlushRemovedBuffers(&removedBuffers);
+    if (res == OK) {
+        onBuffersRemovedLocked(removedBuffers);
+
+        if (notifyBufferManager && mUseBufferManager && removedBuffers.size() > 0) {
+            mBufferManager->onBuffersRemoved(getId(), getStreamSetId(), removedBuffers.size());
+        }
+    }
+}
+
+void Camera3OutputStream::checkRetAndSetAbandonedLocked(status_t res) {
+    // Only transition to STATE_ABANDONED from STATE_CONFIGURED. (If it is
+    // STATE_PREPARING, let prepareNextBuffer handle the error.)
+    if ((res == NO_INIT || res == DEAD_OBJECT) && mState == STATE_CONFIGURED) {
+        mState = STATE_ABANDONED;
+    }
+}
+
+bool Camera3OutputStream::shouldLogError(status_t res, StreamState state) {
+    if (res == OK) {
+        return false;
+    }
+    if ((res == DEAD_OBJECT || res == NO_INIT) && state == STATE_ABANDONED) {
+        return false;
+    }
+    return true;
 }
 
 status_t Camera3OutputStream::disconnectLocked() {
@@ -659,12 +723,11 @@ status_t Camera3OutputStream::getEndpointUsage(uint64_t *usage) const {
     return res;
 }
 
-status_t Camera3OutputStream::getEndpointUsageForSurface(uint64_t *usage,
-        const sp<Surface>& surface) const {
-    status_t res;
-    uint64_t u = 0;
+void Camera3OutputStream::applyZSLUsageQuirk(int format, uint64_t *consumerUsage /*inout*/) {
+    if (consumerUsage == nullptr) {
+        return;
+    }
 
-    res = native_window_get_consumer_usage(static_cast<ANativeWindow*>(surface.get()), &u);
     // If an opaque output stream's endpoint is ImageReader, add
     // GRALLOC_USAGE_HW_CAMERA_ZSL to the usage so HAL knows it will be used
     // for the ZSL use case.
@@ -673,12 +736,20 @@ status_t Camera3OutputStream::getEndpointUsageForSurface(uint64_t *usage,
     //     2. GRALLOC_USAGE_HW_RENDER
     //     3. GRALLOC_USAGE_HW_COMPOSER
     //     4. GRALLOC_USAGE_HW_VIDEO_ENCODER
-    if (camera3_stream::format == HAL_PIXEL_FORMAT_IMPLEMENTATION_DEFINED &&
-            (u & (GRALLOC_USAGE_HW_TEXTURE | GRALLOC_USAGE_HW_RENDER |
+    if (format == HAL_PIXEL_FORMAT_IMPLEMENTATION_DEFINED &&
+            (*consumerUsage & (GRALLOC_USAGE_HW_TEXTURE | GRALLOC_USAGE_HW_RENDER |
             GRALLOC_USAGE_HW_COMPOSER | GRALLOC_USAGE_HW_VIDEO_ENCODER)) == 0) {
-        u |= GRALLOC_USAGE_HW_CAMERA_ZSL;
+        *consumerUsage |= GRALLOC_USAGE_HW_CAMERA_ZSL;
     }
+}
 
+status_t Camera3OutputStream::getEndpointUsageForSurface(uint64_t *usage,
+        const sp<Surface>& surface) const {
+    status_t res;
+    uint64_t u = 0;
+
+    res = native_window_get_consumer_usage(static_cast<ANativeWindow*>(surface.get()), &u);
+    applyZSLUsageQuirk(camera3_stream::format, &u);
     *usage = u;
     return res;
 }
@@ -714,7 +785,7 @@ status_t Camera3OutputStream::updateStream(const std::vector<sp<Surface>> &/*out
     return INVALID_OPERATION;
 }
 
-void Camera3OutputStream::BufferReleasedListener::onBufferReleased() {
+void Camera3OutputStream::BufferProducerListener::onBufferReleased() {
     sp<Camera3OutputStream> stream = mParent.promote();
     if (stream == nullptr) {
         ALOGV("%s: Parent camera3 output stream was destroyed", __FUNCTION__);
@@ -744,6 +815,25 @@ void Camera3OutputStream::BufferReleasedListener::onBufferReleased() {
             stream->mBufferManager->notifyBufferRemoved(
                     stream->getId(), stream->getStreamSetId());
         }
+    }
+}
+
+void Camera3OutputStream::BufferProducerListener::onBuffersDiscarded(
+        const std::vector<sp<GraphicBuffer>>& buffers) {
+    sp<Camera3OutputStream> stream = mParent.promote();
+    if (stream == nullptr) {
+        ALOGV("%s: Parent camera3 output stream was destroyed", __FUNCTION__);
+        return;
+    }
+
+    if (buffers.size() > 0) {
+        Mutex::Autolock l(stream->mLock);
+        stream->onBuffersRemovedLocked(buffers);
+        if (stream->mUseBufferManager) {
+            stream->mBufferManager->onBuffersRemoved(stream->getId(),
+                    stream->getStreamSetId(), buffers.size());
+        }
+        ALOGV("Stream %d: %zu Buffers discarded.", stream->getId(), buffers.size());
     }
 }
 
@@ -779,7 +869,9 @@ status_t Camera3OutputStream::detachBufferLocked(sp<GraphicBuffer>* buffer, int*
         ALOGW("%s: the released buffer has already been freed by the buffer queue!", __FUNCTION__);
     } else if (res != OK) {
         // Treat other errors as abandonment
-        ALOGE("%s: detach next buffer failed: %s (%d).", __FUNCTION__, strerror(-res), res);
+        if (shouldLogError(res, mState)) {
+            ALOGE("%s: detach next buffer failed: %s (%d).", __FUNCTION__, strerror(-res), res);
+        }
         mState = STATE_ABANDONED;
         return res;
     }
@@ -792,11 +884,8 @@ status_t Camera3OutputStream::detachBufferLocked(sp<GraphicBuffer>* buffer, int*
         }
     }
 
-    std::vector<sp<GraphicBuffer>> removedBuffers;
-    res = mConsumer->getAndFlushRemovedBuffers(&removedBuffers);
-    if (res == OK) {
-        onBuffersRemovedLocked(removedBuffers);
-    }
+    // Here we assume detachBuffer is called by buffer manager so it doesn't need to be notified
+    checkRemovedBuffersLocked(/*notifyBufferManager*/false);
     return res;
 }
 

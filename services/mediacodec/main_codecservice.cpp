@@ -21,11 +21,11 @@
 #include "minijail.h"
 
 #include <binder/ProcessState.h>
+#include <cutils/properties.h>
 #include <hidl/HidlTransportSupport.h>
 #include <media/stagefright/omx/1.0/Omx.h>
 #include <media/stagefright/omx/1.0/OmxStore.h>
 
-#include <media/CodecServiceRegistrant.h>
 #include <dlfcn.h>
 
 using namespace android;
@@ -48,37 +48,22 @@ int main(int argc __unused, char** argv)
 
     ::android::hardware::configureRpcThreadpool(64, false);
 
-    // Registration of customized codec services
-    void *registrantLib = dlopen(
-            "libmedia_codecserviceregistrant.so",
-            RTLD_NOW | RTLD_LOCAL);
-    if (registrantLib) {
-        RegisterCodecServicesFunc registerCodecServices =
-                reinterpret_cast<RegisterCodecServicesFunc>(
-                dlsym(registrantLib, "RegisterCodecServices"));
-        if (registerCodecServices) {
-            registerCodecServices();
-        } else {
-            LOG(WARNING) << "Cannot register additional services "
-                    "-- corrupted library.";
-        }
+    // Default codec services
+    using namespace ::android::hardware::media::omx::V1_0;
+    sp<IOmx> omx = new implementation::Omx();
+    if (omx == nullptr) {
+        LOG(ERROR) << "Cannot create IOmx HAL service.";
+    } else if (omx->registerAsService() != OK) {
+        LOG(ERROR) << "Cannot register IOmx HAL service.";
     } else {
-        // Default codec services
-        using namespace ::android::hardware::media::omx::V1_0;
-        sp<IOmxStore> omxStore = new implementation::OmxStore();
-        if (omxStore == nullptr) {
-            LOG(ERROR) << "Cannot create IOmxStore HAL service.";
-        } else if (omxStore->registerAsService() != OK) {
-            LOG(ERROR) << "Cannot register IOmxStore HAL service.";
-        }
-        sp<IOmx> omx = new implementation::Omx();
-        if (omx == nullptr) {
-            LOG(ERROR) << "Cannot create IOmx HAL service.";
-        } else if (omx->registerAsService() != OK) {
-            LOG(ERROR) << "Cannot register IOmx HAL service.";
-        } else {
-            LOG(INFO) << "IOmx HAL service created.";
-        }
+        LOG(INFO) << "IOmx HAL service created.";
+    }
+    sp<IOmxStore> omxStore = new implementation::OmxStore(
+            property_get_int64("vendor.media.omx", 1) ? omx : nullptr);
+    if (omxStore == nullptr) {
+        LOG(ERROR) << "Cannot create IOmxStore HAL service.";
+    } else if (omxStore->registerAsService() != OK) {
+        LOG(ERROR) << "Cannot register IOmxStore HAL service.";
     }
 
     ::android::hardware::joinRpcThreadpool();

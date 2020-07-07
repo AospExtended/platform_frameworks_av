@@ -1,4 +1,6 @@
 /*
+ ** Copyright (c) 2014, The Linux Foundation. All rights reserved.
+ ** Not a Contribution.
  **
  ** Copyright 2010, The Android Open Source Project.
  **
@@ -34,7 +36,11 @@ enum camcorder_quality {
     CAMCORDER_QUALITY_1080P = 6,
     CAMCORDER_QUALITY_QVGA = 7,
     CAMCORDER_QUALITY_2160P = 8,
-    CAMCORDER_QUALITY_LIST_END = 8,
+    CAMCORDER_QUALITY_VGA = 9,
+    CAMCORDER_QUALITY_4KDCI = 10,
+    CAMCORDER_QUALITY_QHD = 11,
+    CAMCORDER_QUALITY_2k = 12,
+    CAMCORDER_QUALITY_LIST_END = 12,
 
     CAMCORDER_QUALITY_TIME_LAPSE_LIST_START = 1000,
     CAMCORDER_QUALITY_TIME_LAPSE_LOW  = 1000,
@@ -46,7 +52,11 @@ enum camcorder_quality {
     CAMCORDER_QUALITY_TIME_LAPSE_1080P = 1006,
     CAMCORDER_QUALITY_TIME_LAPSE_QVGA = 1007,
     CAMCORDER_QUALITY_TIME_LAPSE_2160P = 1008,
-    CAMCORDER_QUALITY_TIME_LAPSE_LIST_END = 1008,
+    CAMCORDER_QUALITY_TIME_LAPSE_VGA = 1009,
+    CAMCORDER_QUALITY_TIME_LAPSE_4KDCI = 1010,
+    CAMCORDER_QUALITY_TIME_LAPSE_QHD = 1011,
+    CAMCORDER_QUALITY_TIME_LAPSE_2k = 1012,
+    CAMCORDER_QUALITY_TIME_LAPSE_LIST_END = 1012,
 
     CAMCORDER_QUALITY_HIGH_SPEED_LIST_START = 2000,
     CAMCORDER_QUALITY_HIGH_SPEED_LOW  = 2000,
@@ -55,7 +65,10 @@ enum camcorder_quality {
     CAMCORDER_QUALITY_HIGH_SPEED_720P = 2003,
     CAMCORDER_QUALITY_HIGH_SPEED_1080P = 2004,
     CAMCORDER_QUALITY_HIGH_SPEED_2160P = 2005,
-    CAMCORDER_QUALITY_HIGH_SPEED_LIST_END = 2005,
+    CAMCORDER_QUALITY_HIGH_SPEED_CIF = 2006,
+    CAMCORDER_QUALITY_HIGH_SPEED_VGA = 2007,
+    CAMCORDER_QUALITY_HIGH_SPEED_4KDCI = 2008,
+    CAMCORDER_QUALITY_HIGH_SPEED_LIST_END = 2008,
 };
 
 enum video_decoder {
@@ -152,6 +165,9 @@ public:
      * enc.vid.bps.max - max bit rate in bits per second
      * enc.vid.fps.min - min frame rate in frames per second
      * enc.vid.fps.max - max frame rate in frames per second
+     * enc.vid.hfr.width.max - max hfr video frame width
+     * enc.vid.hfr.height.max - max hfr video frame height
+     * enc.vid.hfr.mode.max - max hfr mode
      */
     int getVideoEncoderParamByName(const char *name, video_encoder codec) const;
 
@@ -290,12 +306,16 @@ private:
                         int minBitRate, int maxBitRate,
                         int minFrameWidth, int maxFrameWidth,
                         int minFrameHeight, int maxFrameHeight,
-                        int minFrameRate, int maxFrameRate)
+                        int minFrameRate, int maxFrameRate,
+                        int maxHFRFrameWidth, int maxHFRFrameHeight,
+                        int maxHFRMode)
             : mCodec(codec),
               mMinBitRate(minBitRate), mMaxBitRate(maxBitRate),
               mMinFrameWidth(minFrameWidth), mMaxFrameWidth(maxFrameWidth),
               mMinFrameHeight(minFrameHeight), mMaxFrameHeight(maxFrameHeight),
-              mMinFrameRate(minFrameRate), mMaxFrameRate(maxFrameRate) {}
+              mMinFrameRate(minFrameRate), mMaxFrameRate(maxFrameRate),
+              mMaxHFRFrameWidth(maxHFRFrameWidth), mMaxHFRFrameHeight(maxHFRFrameHeight),
+              mMaxHFRMode(maxHFRMode) {}
 
          ~VideoEncoderCap() {}
 
@@ -304,6 +324,8 @@ private:
         int mMinFrameWidth, mMaxFrameWidth;
         int mMinFrameHeight, mMaxFrameHeight;
         int mMinFrameRate, mMaxFrameRate;
+        int mMaxHFRFrameWidth, mMaxHFRFrameHeight;
+        int mMaxHFRMode;
     };
 
     struct AudioEncoderCap {
@@ -422,6 +444,7 @@ private:
     static VideoEncoderCap* createDefaultH263VideoEncoderCap();
     static VideoEncoderCap* createDefaultM4vVideoEncoderCap();
     static AudioEncoderCap* createDefaultAmrNBEncoderCap();
+    static AudioEncoderCap* createDefaultAacEncoderCap();
 
     static int findTagForName(const NameToTagMap *map, size_t nMappings, const char *name);
 
