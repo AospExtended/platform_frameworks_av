@@ -2978,6 +2978,7 @@ status_t CameraService::BasicClient::startCameraOps() {
             return PERMISSION_DENIED;
         }
 
+#ifndef NO_CAMERA_SERVER
         // If the calling Uid is trusted (a native service), the AppOpsManager could
         // return MODE_IGNORED. Do not treat such case as error.
         if (!isFaceUnlockPackage() && !mUidIsTrusted && res == AppOpsManager::MODE_IGNORED) {
@@ -2986,6 +2987,7 @@ status_t CameraService::BasicClient::startCameraOps() {
             // Return the same error as for device policy manager rejection
             return -EACCES;
         }
+#endif
     }
 
     mOpsActive = true;
