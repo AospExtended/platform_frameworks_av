@@ -1,0 +1,21 @@
+{
+  "comments": [
+    {
+      "unresolved": false,
+      "key": {
+        "uuid": "6104bdb4_39c3d8b6",
+        "filename": "/PATCHSET_LEVEL",
+        "patchSetId": 1
+      },
+      "lineNbr": 0,
+      "author": {
+        "id": 1000010
+      },
+      "writtenOn": "2021-05-30T11:15:35Z",
+      "side": 1,
+      "message": "I tried the shim but it just opens the camera and crashes cameraservice whenever MediaPlayer() is called which means can\u0027t capture pictures..\nSeems like this is necessary and the shim had to be removed..",
+      "revId": "fc0e6739aa66dbdef7f412fe6c7295cc21aafd5b",
+      "serverId": "692a3d4a-6cfc-41d4-b12b-cb9542eed61e"
+    }
+  ]
+}
