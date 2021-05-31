@@ -16,6 +16,23 @@
       "message": "I tried the shim but it just opens the camera and crashes cameraservice whenever MediaPlayer() is called which means can\u0027t capture pictures..\nSeems like this is necessary and the shim had to be removed..",
       "revId": "fc0e6739aa66dbdef7f412fe6c7295cc21aafd5b",
       "serverId": "692a3d4a-6cfc-41d4-b12b-cb9542eed61e"
+    },
+    {
+      "unresolved": false,
+      "key": {
+        "uuid": "c1ff0fb4_3cc7b54b",
+        "filename": "/PATCHSET_LEVEL",
+        "patchSetId": 1
+      },
+      "lineNbr": 0,
+      "author": {
+        "id": 1000002
+      },
+      "writtenOn": "2021-05-31T14:32:38Z",
+      "side": 1,
+      "message": "Do we still need this after https://github.com/AospExtended/platform_packages_apps_Settings/commit/48257d8ddbbabb8d9d981952d2219643df44b570 ?",
+      "revId": "fc0e6739aa66dbdef7f412fe6c7295cc21aafd5b",
+      "serverId": "692a3d4a-6cfc-41d4-b12b-cb9542eed61e"
     }
   ]
 }
